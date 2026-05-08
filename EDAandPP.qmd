@@ -672,64 +672,118 @@ cat(model_data_overview_latex)
 # Plausibility and Anomaly Checks
 
 ```{r anomaly-checks}
-# DEFINE BASIC PLAUSIBILITY FLAGS
-anomaly_flags <- airbnb %>%
+# Define Basic Plausibility Flags for the Reduced Dataset:
+anomaly_flags <- airbnb_reduced |>
   mutate(
     flag_non_positive_price = !is.na(price) & price <= 0,
     flag_non_positive_accommodates = !is.na(accommodates) & accommodates <= 0,
-    flag_negative_bathrooms = !is.na(bathrooms) & bathrooms < 0,
-    flag_negative_bedrooms = !is.na(bedrooms) & bedrooms < 0,
-    flag_negative_beds = !is.na(beds) & beds < 0,
-    flag_availability_365_outside_range = !is.na(availability_365) & (availability_365 < 0 | availability_365 > 365),
-    flag_booked_365_outside_range = !is.na(booked_365) & (booked_365 < 0 | booked_365 > 365),
-    flag_review_rating_outside_range = !is.na(review_scores_rating) & (review_scores_rating < 0 | review_scores_rating > 5),
-    flag_latitude_outside_cpt_range = !is.na(latitude) & (latitude < -35 | latitude > -32),
-    flag_longitude_outside_cpt_range = !is.na(longitude) & (longitude < 17 | longitude > 20)
+    flag_negative_host_listings_count = !is.na(host_listings_count) & host_listings_count < 0,
+    flag_negative_number_of_reviews = !is.na(number_of_reviews) & number_of_reviews < 0,
+    flag_availability_365_outside_range = !is.na(availability_365) & 
+      (availability_365 < 0 | availability_365 > 365),
+    flag_review_rating_outside_range = !is.na(review_scores_rating) & 
+      (review_scores_rating < 0 | review_scores_rating > 5),
+    flag_latitude_outside_cpt_range = !is.na(latitude) & 
+      (latitude < -35 | latitude > -32),
+    flag_longitude_outside_cpt_range = !is.na(longitude) & 
+      (longitude < 17 | longitude > 20)
   )
 
-anomaly_summary <- anomaly_flags %>%
-  summarise(across(starts_with("flag_"), ~sum(.x, na.rm = TRUE))) %>%
-  pivot_longer(everything(), names_to = "anomaly_check", values_to = "n_flagged") %>%
-  arrange(desc(n_flagged))
+# Summarise Plausibility Flags:
+anomaly_summary <- anomaly_flags |>
+  summarise(
+    across(
+      starts_with("flag_"),
+      ~sum(.x, na.rm = TRUE)
+    )
+  ) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Anomaly_Check",
+    values_to = "N_Flagged"
+  ) |>
+  mutate(
+    Anomaly_Check = Anomaly_Check |>
+      str_remove("^flag_") |>
+      str_replace_all("_", " ") |>
+      str_to_title()
+  ) |>
+  arrange(desc(N_Flagged))
 
-anomaly_summary %>%
-  kable(caption = "Plausibility and Anomaly Checks") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"))
+# Check that Dummy Variables are Binary:
+dummy_binary_summary <- airbnb_categorical_dummies |>
+  summarise(
+    across(
+      everything(),
+      ~sum(!(.x %in% c(0, 1)), na.rm = TRUE)
+    )
+  ) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Dummy_Variable",
+    values_to = "N_Non_Binary"
+  ) |>
+  summarise(
+    Anomaly_Check = "Non-Binary Dummy Variable Values",
+    N_Flagged = sum(N_Non_Binary)
+  )
+
+# Combine Raw Variable and Dummy Variable Checks:
+anomaly_summary <- bind_rows(
+  anomaly_summary,
+  dummy_binary_summary
+)
+
+anomaly_summary
 ```
 
-```{r boxplots, fig.cap="Boxplots used to identify skewness and potential extreme values."}
-# BOXPLOTS FOR SELECTED NUMERIC VARIABLES
-airbnb %>%
-  select(all_of(existing_outlier_vars)) %>%
-  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
-  ggplot(aes(x = variable, y = value)) +
-  geom_boxplot(outlier.alpha = 0.25) +
+```{r boxplots, fig.cap="Boxplots used to identify skewness and potential extreme values in retained numeric variables."}
+# Boxplots for Retained Numeric Variables:
+
+# Specify Retained Numeric Variables for Outlier Inspection:
+outlier_vars <- c(
+  "host_listings_count",
+  "accommodates",
+  "price",
+  "availability_365",
+  "number_of_reviews",
+  "review_scores_rating"
+)
+
+# Keep Only Numeric Variables that Exist in the Reduced Dataset:
+existing_outlier_vars <- intersect(outlier_vars, names(airbnb_reduced))
+
+# Set Plot Text Sizes:
+plot_title_size <- 16
+axis_title_size <- 13
+axis_text_size <- 10
+strip_text_size <- 11
+
+# Produce Faceted Boxplots for Retained Numeric Variables:
+airbnb_reduced |>
+  select(all_of(existing_outlier_vars)) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "Value"
+  ) |>
+  ggplot(aes(x = Variable, y = Value, fill = Variable)) +
+  geom_boxplot(outlier.alpha = 0.25, show.legend = FALSE) +
   coord_flip() +
-  facet_wrap(~variable, scales = "free", ncol = 2) +
+  facet_wrap(~ Variable, scales = "free", ncol = 2) +
   labs(
     x = NULL,
     y = NULL,
-    title = "Potential Outliers in Key Numeric Variables"
+    title = "Potential Outliers in Retained Numeric Variables"
   ) +
   theme_minimal() +
-  theme(axis.text.y = element_blank())
-```
-
-# Location and Ward-Level Exploration
-
-```{r location-plot, fig.cap="Spatial distribution of Airbnb listings across Cape Town."}
-# PLOT LISTING LOCATIONS USING LATITUDE AND LONGITUDE
-airbnb %>%
-  filter(!is.na(latitude), !is.na(longitude)) %>%
-  ggplot(aes(x = longitude, y = latitude)) +
-  geom_point(alpha = 0.25, size = 0.6) +
-  coord_fixed() +
-  labs(
-    x = "Longitude",
-    y = "Latitude",
-    title = "Spatial Distribution of Airbnb Listings"
-  ) +
-  theme_minimal()
+  theme(
+    plot.title = element_text(size = plot_title_size, face = "bold"),
+    axis.title = element_text(size = axis_title_size),
+    axis.text = element_text(size = axis_text_size),
+    strip.text = element_text(size = strip_text_size, face = "bold"),
+    axis.text.y = element_blank()
+  )
 ```
 
 # Summary of Required Pre-processing

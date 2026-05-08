@@ -5,7 +5,7 @@ editor: visual
 ---
 
 ```{r setup}
-# LOAD REQUIRED PACKAGES
+# Loading Required Packages:
 library(tidyverse)
 library(janitor)
 library(skimr)
@@ -15,150 +15,106 @@ library(patchwork)
 library(knitr)
 library(kableExtra)
 library(GGally)
-
-# SET GLOBAL OPTIONS
-set.seed(123)
-options(scipen = 999)
 ```
 
-# Introduction
-
-This exploratory data analysis first establishes the structure, completeness and plausibility of the Airbnb listings data. The objective is to identify variable types, missingness, duplicates, anomalous values, distributional features, categorical concentrations and location-level differences before specifying the data-cleaning and pre-processing steps required for the later cluster analysis and self-organising map modelling.
-
-# Data Loading and Initial Structure
+# Data Loading and Raw Structure
 
 ```{r load-data}
-# LOAD THE RDATA FILE
+# Loading the Data:
 load("airbnbListings.RData")
 
-# STORE THE LOADED DATA OBJECT
+# Storing the Loaded Data Object:
 raw_data <- Airbnb_Excel_Lab_AAMB_Co
 
-# CHECK THE CLASS AND DIMENSION OF THE DATASET
+# Chhecking the Class and Dimensions of the Data:
 class(raw_data)
 dim(raw_data)
 ```
 
 ```{r variable-structure}
-# INSPECT THE RAW VARIABLE TYPES
+# Inspection of the Raw Variables Types
 str(raw_data)
 ```
 
 ```{r clean-variable-names}
-# CLEAN VARIABLE NAMES FOR EASIER DOWNSTREAM USE
-airbnb <- raw_data %>%
+# Cleaning Variable Names:
+airbnb <- raw_data |>
   clean_names()
 
-# DISPLAY CLEANED VARIABLE NAMES
+# Display Cleaned Variable Names:
 names(airbnb)
 ```
 
 ```{r basic-overview-table}
-# CREATE A BASIC DATA OVERVIEW TABLE
+# Creation of a Basic Overview Table:
 basic_overview <- tibble(
-  rows = nrow(airbnb),
-  columns = ncol(airbnb),
-  duplicate_rows = sum(duplicated(airbnb)),
-  duplicate_ids = sum(duplicated(airbnb$id)),
-  unique_hosts = n_distinct(airbnb$host_id),
-  unique_neighbourhoods = n_distinct(airbnb$neighbourhood_cleansed),
-  unique_property_types = n_distinct(airbnb$property_type_proper_trim),
-  unique_room_types = n_distinct(airbnb$room_type_proper_trim)
+  Measure = c(
+    "Rows",
+    "Columns",
+    "Duplicate Rows",
+    "Duplicate IDs",
+    "Unique Hosts",
+    "Unique Neighbourhoods",
+    "Unique Property Types",
+    "Unique Room Types"
+  ),
+  Value = c(
+    nrow(airbnb),
+    ncol(airbnb),
+    sum(duplicated(airbnb)),
+    sum(duplicated(airbnb$id)),
+    n_distinct(airbnb$host_id),
+    n_distinct(airbnb$neighbourhood_cleansed),
+    n_distinct(airbnb$property_type_proper_trim),
+    n_distinct(airbnb$room_type_proper_trim)
+  )
 )
 
-basic_overview %>%
-  kable(caption = "Basic Overview of the Airbnb Listings Dataset") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"))
+# Outputting the Table in Copy-and-Paste Ready LaTeX:
+basic_overview_latex <- basic_overview %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Basic Overview of the Airbnb Listings Dataset",
+    align = c("l", "r")
+  ) %>%
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(basic_overview_latex)
 ```
 
 # Missing Data Assessment
 
 ```{r missingness-table}
-# CALCULATE MISSINGNESS BY VARIABLE
-missing_summary <- airbnb %>%
-  summarise(across(everything(), ~sum(is.na(.x)))) %>%
-  pivot_longer(everything(), names_to = "variable", values_to = "missing_n") %>%
+# Calculate Missingness by Variable:
+missing_summary <- airbnb |>
+  summarise(across(everything(), ~sum(is.na(.x)))) |>
+  pivot_longer(everything(), names_to = "Variable", values_to = "Missing_N") |>
   mutate(
-    missing_pct = missing_n / nrow(airbnb),
-    missing_pct = percent(missing_pct, accuracy = 0.1)
-  ) %>%
-  arrange(desc(missing_n))
+    Missing_Pct = Missing_N / nrow(airbnb),
+    Missing_Pct = percent(Missing_Pct, accuracy = 0.1)
+  ) |>
+  arrange(desc(Missing_N))
 
-missing_summary %>%
-  filter(missing_n > 0) %>%
-  kable(caption = "Variables with Missing Values") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"))
-```
+# Output Missingness Summary Table in Copy-and-Paste Ready LaTeX:
+missing_summary_latex <- missing_summary |>
+  filter(Missing_N > 0) |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Variables with Missing Values",
+    align = c("l", "r", "r")
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
 
-```{r missingness-plot, fig.cap="Missingness profile across Airbnb listing variables."}
-# VISUALISE MISSINGNESS PATTERNS
-missing_summary %>%
-  mutate(variable = fct_reorder(variable, missing_n)) %>%
-  ggplot(aes(x = variable, y = missing_n)) +
-  geom_col() +
-  coord_flip() +
-  labs(
-    x = NULL,
-    y = "Number of missing values",
-    title = "Missing Values by Variable"
-  ) +
-  theme_minimal()
-```
-
-```{r missingness-map, fig.cap="Missingness map for a random sample of listings."}
-# DISPLAY MISSINGNESS MAP FOR A SAMPLE TO AVOID OVERPLOTTING
-set.seed(123)
-airbnb %>%
-  slice_sample(n = min(1000, nrow(airbnb))) %>%
-  vis_miss() +
-  labs(title = "Missingness Map for Sampled Listings")
-```
-
-# Variable Type Classification
-
-```{r variable-type-table}
-# CLASSIFY VARIABLES BY CURRENT DATA TYPE
-variable_types <- tibble(
-  variable = names(airbnb),
-  class = map_chr(airbnb, ~class(.x)[1]),
-  unique_values = map_int(airbnb, n_distinct),
-  missing_values = map_int(airbnb, ~sum(is.na(.x)))
-)
-
-variable_types %>%
-  kable(caption = "Variable Types After Name Cleaning") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"))
+cat(missing_summary_latex)
 ```
 
 # Numeric Variable Summaries
-
-```{r numeric-summary}
-# SELECT NUMERIC VARIABLES FOR SUMMARY
-num_vars <- airbnb %>%
-  select(where(is.numeric))
-
-# CREATE COMPACT NUMERIC SUMMARY TABLE
-numeric_summary <- num_vars %>%
-  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
-  group_by(variable) %>%
-  summarise(
-    n = sum(!is.na(value)),
-    missing = sum(is.na(value)),
-    mean = mean(value, na.rm = TRUE),
-    sd = sd(value, na.rm = TRUE),
-    min = min(value, na.rm = TRUE),
-    q1 = quantile(value, 0.25, na.rm = TRUE),
-    median = median(value, na.rm = TRUE),
-    q3 = quantile(value, 0.75, na.rm = TRUE),
-    max = max(value, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-numeric_summary %>%
-  mutate(across(where(is.numeric), ~round(.x, 2))) %>%
-  kable(caption = "Summary Statistics for Numeric Variables") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"))
-```
 
 ```{r numeric-distributions, fig.cap="Distributions of key numeric Airbnb listing variables."}
 # PLOT DISTRIBUTIONS OF KEY NUMERIC VARIABLES

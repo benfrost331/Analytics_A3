@@ -85,120 +85,588 @@ basic_overview_latex <- basic_overview %>%
 cat(basic_overview_latex)
 ```
 
-# Missing Data Assessment
+# Derived & Redundant Variable Removal:
 
-```{r missingness-table}
-# Calculate Missingness by Variable:
-missing_summary <- airbnb |>
-  summarise(across(everything(), ~sum(is.na(.x)))) |>
-  pivot_longer(everything(), names_to = "Variable", values_to = "Missing_N") |>
-  mutate(
-    Missing_Pct = Missing_N / nrow(airbnb),
-    Missing_Pct = percent(Missing_Pct, accuracy = 0.1)
-  ) |>
-  arrange(desc(Missing_N))
+```{r remove-derived-variables}
+# Remove Identifier, Label and Derived / Redundant Variables Prior to Missing Data Assessment:
+derived_vars <- c(
+  # Identifier and label variables not useful for clustering:
+  "id",
+  "host_id",
+  "host_name_trimmed_proper",
+  "picture_url",
+  
+  # Duplicated or less complete location variable:
+  "neighbourhood_proper_trim",
+  
+  # Derived / redundant host count variable:
+  "host_total_listings_count",
+  
+  # Room type is treated as a simplified / derived listing classification:
+  "room_type_proper_trim",
+  
+  # Bedroom count is treated as a derived / overlapping capacity measure:
+  "bedrooms",
+  
+  # Time-window booking variables derived from booking activity:
+  "booked_30",
+  "booked_60",
+  "booked_90",
+  "booked_365",
+  
+  # Revenue variables derived from price and booking activity:
+  "revenue_30",
+  "revenue_60",
+  "revenue_90",
+  "revenue_365",
+  
+  # Shorter availability windows derived from the same availability concept:
+  "availability_30",
+  "availability_60",
+  "availability_90",
+  
+  # Review count variants derived from the overall review activity concept:
+  "number_of_reviews_ltm",
+  "number_of_reviews_l30d",
+  "reviews_per_month"
+)
 
-# Output Missingness Summary Table in Copy-and-Paste Ready LaTeX:
-missing_summary_latex <- missing_summary |>
-  filter(Missing_N > 0) |>
+# Create the Reduced Working Dataset:
+airbnb_reduced <- airbnb |>
+  select(-any_of(derived_vars))
+
+# Create a Small Audit Table of Removed Variables:
+removed_vars_table <- tibble(
+  Removed_Variable = derived_vars,
+  Reason = c(
+    "Unique listing identifier; retained only for auditability in the raw dataset.",
+    "Unique host identifier; arbitrary numeric ID not suitable for distance-based modelling.",
+    "Host name label; high-cardinality text field not suitable for clustering.",
+    "Image URL; not analytically useful for clustering.",
+    "Incomplete location field; information retained through neighbourhood_cleansed.",
+    "Redundant host count field; host_listings_count retained.",
+    "Simplified room classification; overlapping listing type information retained through property_type_proper_trim.",
+    "Overlapping capacity measure; listing size retained through accommodates.",
+    "Derived booking activity measure.",
+    "Derived booking activity measure.",
+    "Derived booking activity measure.",
+    "Derived booking activity measure.",
+    "Derived revenue measure based on price and bookings.",
+    "Derived revenue measure based on price and bookings.",
+    "Derived revenue measure based on price and bookings.",
+    "Derived revenue measure based on price and bookings.",
+    "Short-window version of availability.",
+    "Short-window version of availability.",
+    "Short-window version of availability.",
+    "Derived recent review count.",
+    "Derived recent review count.",
+    "Derived review frequency measure."
+  )
+)
+
+# Output Removed Variables Table in Copy-and-Paste Ready LaTeX:
+removed_vars_latex <- removed_vars_table |>
   kable(
     format = "latex",
     booktabs = TRUE,
-    caption = "Variables with Missing Values",
-    align = c("l", "r", "r")
+    caption = "Variables Removed Prior to Missing Data Assessment",
+    align = c("l", "l"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  ) |>
+  column_spec(1, width = "4cm") |>
+  column_spec(2, width = "9cm")
+
+cat(removed_vars_latex)
+```
+
+# Highly Correlated Variable Removal:
+
+```{r remove-highly-correlated-variables}
+# Identify Highly Correlated Numeric Variables:
+numeric_data <- airbnb_reduced |>
+  select(where(is.numeric))
+
+# Calculate Absolute Correlation Matrix:
+cor_matrix <- numeric_data |>
+  cor(use = "pairwise.complete.obs") |>
+  abs()
+
+# Convert Correlation Matrix to Long Format:
+high_corr_pairs <- as.data.frame(as.table(cor_matrix)) |>
+  rename(
+    Variable_1 = Var1,
+    Variable_2 = Var2,
+    Correlation = Freq
+  ) |>
+  filter(
+    Variable_1 != Variable_2,
+    Correlation >= 0.90
+  ) |>
+  mutate(
+    Pair_ID = pmap_chr(
+      list(as.character(Variable_1), as.character(Variable_2)),
+      ~paste(sort(c(..1, ..2)), collapse = "_")
+    )
+  ) |>
+  distinct(Pair_ID, .keep_all = TRUE) |>
+  select(-Pair_ID) |>
+  arrange(desc(Correlation))
+
+# Specify Variables to Remove Based on High Correlation and Interpretability:
+high_corr_vars <- c(
+  "beds",
+  "bathrooms",
+  "review_scores_accuracy",
+  "review_scores_cleanliness",
+  "review_scores_checkin",
+  "review_scores_communication",
+  "review_scores_location",
+  "review_scores_value"
+)
+
+# Create the Further Reduced Working Dataset:
+airbnb_reduced <- airbnb_reduced |>
+  select(-any_of(high_corr_vars))
+
+# Create a Small Audit Table of Removed Highly Correlated Variables:
+high_corr_removed_table <- tibble(
+  Removed_Variable = high_corr_vars,
+  Retained_Information = c(
+    "Property capacity retained through accommodates and bedrooms.",
+    "Property size retained through accommodates and bedrooms.",
+    "Overall review quality retained through review_scores_rating.",
+    "Overall review quality retained through review_scores_rating.",
+    "Overall review quality retained through review_scores_rating.",
+    "Overall review quality retained through review_scores_rating.",
+    "Overall review quality retained through review_scores_rating.",
+    "Overall review quality retained through review_scores_rating."
+  )
+)
+
+# Output Highly Correlated Variable Removal Table in Copy-and-Paste Ready LaTeX:
+high_corr_removed_latex <- high_corr_removed_table |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Highly Correlated Variables Removed Prior to Missing Data Assessment",
+    align = c("l", "l"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  ) |>
+  column_spec(1, width = "4cm") |>
+  column_spec(2, width = "9cm")
+
+cat(high_corr_removed_latex)
+
+```
+
+# Remaining Variables
+
+```{r remaining-variables-table}
+# Create Table of Remaining Variables After Redundancy-Based Removal:
+remaining_vars_table <- tibble(
+  Variable = names(airbnb_reduced),
+  Type = sapply(airbnb_reduced, \(x) class(x)[1])
+) |>
+  mutate(
+    Variable_Number = row_number()
+  ) |>
+  select(Variable_Number, Variable, Type)
+
+# Output Remaining Variables Table in Copy-and-Paste Ready LaTeX:
+remaining_vars_latex <- remaining_vars_table |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Variables Retained After Redundancy-Based Removal",
+    align = c("r", "l", "l"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  ) |>
+  column_spec(1, width = "2.5cm") |>
+  column_spec(2, width = "6cm") |>
+  column_spec(3, width = "3cm")
+
+cat(remaining_vars_latex)
+```
+
+
+# Missing Data Assessment
+
+```{r missingness-table-reduced}
+# Calculate Missingness by Variable in the Reduced Dataset:
+missing_summary <- airbnb_reduced |>
+  summarise(across(everything(), ~sum(is.na(.x)))) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "N_Observations_Missing"
+  ) |>
+  mutate(
+    Pct_Observations_Missing = N_Observations_Missing / nrow(airbnb_reduced),
+    Pct_Observations_Missing = percent(Pct_Observations_Missing, accuracy = 0.001)
+  ) |>
+  arrange(desc(N_Observations_Missing))
+
+missing_summary
+```
+
+# Key Numeric Variable Distributions
+
+```{r numeric-distributions, fig.cap="Distributions of retained numeric Airbnb listing variables."}
+# Plot Distributions of Retained Numeric Variables:
+key_numeric <- c(
+  "host_listings_count",
+  "accommodates",
+  "price",
+  "availability_365",
+  "number_of_reviews",
+  "review_scores_rating"
+)
+
+# Set Plot Text Sizes:
+plot_title_size <- 16
+axis_title_size <- 13
+axis_text_size <- 10
+strip_text_size <- 11
+
+# Keep Only Numeric Variables that Exist in the Reduced Dataset:
+existing_key_numeric <- intersect(key_numeric, names(airbnb_reduced))
+
+# Produce Faceted Histograms of the Retained Numeric Variables:
+airbnb_reduced |>
+  select(all_of(existing_key_numeric)) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) |>
+  ggplot(aes(x = value, fill = variable)) +
+  geom_histogram(bins = 30, colour = "white", show.legend = FALSE) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(
+    x = NULL,
+    y = "Listings"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = plot_title_size, face = "bold"),
+    axis.title = element_text(size = axis_title_size),
+    axis.text = element_text(size = axis_text_size),
+    strip.text = element_text(size = strip_text_size, face = "bold")
+  )
+```
+
+# Transformation & Standardsation of Numeric Variables:
+
+```{r numeric-transform-standardise}
+# Specify Numeric Variables to be Used for Modelling:
+numeric_model_vars <- c(
+  "host_listings_count",
+  "accommodates",
+  "price",
+  "availability_365",
+  "number_of_reviews",
+  "review_scores_rating"
+)
+
+# Specify Strongly Right-Skewed Variables for Log Transformation:
+log_transform_vars <- c(
+  "host_listings_count",
+  "price",
+  "number_of_reviews"
+)
+
+# Create Transformed and Standardised Numeric Modelling Dataset:
+airbnb_numeric_scaled <- airbnb_reduced |>
+  select(all_of(numeric_model_vars)) |>
+  mutate(
+    across(
+      all_of(log_transform_vars),
+      ~ log1p(.x),
+      .names = "log_{.col}"
+    )
+  ) |>
+  select(
+    -all_of(log_transform_vars)
+  ) |>
+  mutate(
+    across(
+      everything(),
+      ~ as.numeric(scale(.x)),
+      .names = "scaled_{.col}"
+    )
+  ) |>
+  select(
+    starts_with("scaled_")
+  )
+
+# Rename Variables for Cleaner Modelling Output:
+names(airbnb_numeric_scaled) <- names(airbnb_numeric_scaled) |>
+  str_remove("^scaled_") |>
+  str_remove("^log_")
+```
+
+# Transformed & Standardised Key Numeric Variable Distributions
+
+```{r transformed-standardised-numeric-distributions, fig.cap="Distributions of transformed and standardised numeric Airbnb listing variables."}
+# Plot Distributions of Transformed and Standardised Numeric Variables:
+
+# Set Plot Text Sizes:
+plot_title_size <- 16
+axis_title_size <- 13
+axis_text_size <- 10
+strip_text_size <- 11
+
+# Rename Variables for Clearer Plot Headings:
+airbnb_numeric_scaled_plot <- airbnb_numeric_scaled |>
+  rename(
+    `log(host_listings_count)` = host_listings_count,
+    accommodates = accommodates,
+    `log(price)` = price,
+    availability_365 = availability_365,
+    `log(number_of_reviews)` = number_of_reviews,
+    review_scores_rating = review_scores_rating
+  )
+
+# Produce Faceted Histograms of the Transformed and Standardised Numeric Variables:
+airbnb_numeric_scaled_plot |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) |>
+  ggplot(aes(x = value, fill = variable)) +
+  geom_histogram(bins = 30, colour = "white", show.legend = FALSE) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(
+    x = "Standardised Value",
+    y = "Listings"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = plot_title_size, face = "bold"),
+    axis.title = element_text(size = axis_title_size),
+    axis.text = element_text(size = axis_text_size),
+    strip.text = element_text(size = strip_text_size, face = "bold")
+  )
+```
+
+# Categorical Variable Summaries
+
+
+```{r categorical-frequency-tables}
+# Create Frequency Tables for Retained Categorical Variables:
+cat_vars <- c(
+  "neighbourhood_cleansed",
+  "property_type_proper_trim"
+)
+
+# Keep Only Categorical Variables that Exist in the Reduced Dataset:
+existing_cat_vars <- intersect(cat_vars, names(airbnb_reduced))
+
+# Create Top Category Frequency Tables:
+cat_frequency_tables <- airbnb_reduced |>
+  select(all_of(existing_cat_vars)) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "Category"
+  ) |>
+  count(Variable, Category, sort = TRUE) |>
+  group_by(Variable) |>
+  mutate(
+    Pct = percent(n / sum(n), accuracy = 0.1)
+  ) |>
+  slice_max(n, n = 10, with_ties = FALSE) |>
+  ungroup() |>
+  rename(
+    Frequency = n,
+    Percentage = Pct
+  )
+
+# Output Categorical Frequency Tables in Copy-and-Paste Ready LaTeX:
+cat_frequency_latex <- cat_frequency_tables |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Top Categories for Retained Categorical Variables",
+    align = c("l", "l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  ) |>
+  column_spec(1, width = "4cm") |>
+  column_spec(2, width = "6cm") |>
+  column_spec(3, width = "3cm") |>
+  column_spec(4, width = "3cm")
+
+cat(cat_frequency_latex)
+```
+
+```{r categorical-frequency-plots, fig.cap="Top categories for retained categorical Airbnb variables."}
+# Visualise Top Categories for Retained Categorical Variables:
+
+# Set Plot Text Sizes:
+plot_title_size <- 16
+axis_title_size <- 13
+axis_text_size <- 10
+strip_text_size <- 11
+
+# Create Frequency Plot for Retained Categorical Variables:
+cat_frequency_tables |>
+  mutate(
+    Category = fct_reorder(Category, Frequency)
+  ) |>
+  ggplot(aes(x = Category, y = Frequency, fill = Variable)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~ Variable, scales = "free_y", ncol = 1) +
+  labs(
+    x = NULL,
+    y = "Number of Listings"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = plot_title_size, face = "bold"),
+    axis.title = element_text(size = axis_title_size),
+    axis.text = element_text(size = axis_text_size),
+    strip.text = element_text(size = strip_text_size, face = "bold")
+  )
+```
+
+```{r categorical-consolidation-dummy-encoding}
+# Consolidate Retained Categorical Variables Before Dummy Encoding:
+
+# Specify Retained Categorical Variables:
+categorical_model_vars <- c(
+  "neighbourhood_cleansed",
+  "property_type_proper_trim"
+)
+
+# Specify the Number of Major Categories to Retain:
+n_major_neighbourhoods <- 10
+n_major_property_types <- 10
+
+# Identify Major Neighbourhood Categories:
+major_neighbourhoods <- airbnb_reduced |>
+  count(neighbourhood_cleansed, sort = TRUE) |>
+  slice_head(n = n_major_neighbourhoods) |>
+  pull(neighbourhood_cleansed)
+
+# Identify Major Property Type Categories:
+major_property_types <- airbnb_reduced |>
+  count(property_type_proper_trim, sort = TRUE) |>
+  slice_head(n = n_major_property_types) |>
+  pull(property_type_proper_trim)
+
+# Create Consolidated Categorical Variables:
+airbnb_categorical_consolidated <- airbnb_reduced |>
+  mutate(
+    neighbourhood_grouped = if_else(
+      neighbourhood_cleansed %in% major_neighbourhoods,
+      neighbourhood_cleansed,
+      "Other"
+    ),
+    property_type_grouped = if_else(
+      property_type_proper_trim %in% major_property_types,
+      property_type_proper_trim,
+      "Other"
+    )
+  ) |>
+  select(
+    neighbourhood_grouped,
+    property_type_grouped
+  )
+
+# Create Audit Table Showing Consolidated Category Frequencies:
+consolidated_cat_summary <- airbnb_categorical_consolidated |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "Category"
+  ) |>
+  count(Variable, Category, sort = TRUE) |>
+  group_by(Variable) |>
+  mutate(
+    Percentage = percent(n / sum(n), accuracy = 0.1)
+  ) |>
+  ungroup() |>
+  rename(
+    Frequency = n
+  )
+
+# Output Consolidated Category Summary in Copy-and-Paste Ready LaTeX:
+consolidated_cat_summary_latex <- consolidated_cat_summary |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Consolidated Categorical Variables Prior to Dummy Encoding",
+    align = c("l", "l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  ) |>
+  column_spec(1, width = "4cm") |>
+  column_spec(2, width = "6cm") |>
+  column_spec(3, width = "3cm") |>
+  column_spec(4, width = "3cm")
+
+cat(consolidated_cat_summary_latex)
+
+# Dummy Encode the Consolidated Categorical Variables:
+airbnb_categorical_dummies <- model.matrix(
+  ~ neighbourhood_grouped + property_type_grouped - 1,
+  data = airbnb_categorical_consolidated
+) |>
+  as.data.frame()
+
+# Clean Dummy Variable Names:
+names(airbnb_categorical_dummies) <- names(airbnb_categorical_dummies) |>
+  str_replace_all("neighbourhood_grouped", "neighbourhood_") |>
+  str_replace_all("property_type_grouped", "property_type_") |>
+  str_replace_all("[^A-Za-z0-9_]", "_") |>
+  str_replace_all("_+", "_") |>
+  str_remove("_$") |>
+  str_to_lower()
+
+# Combine Standardised Numeric Variables and Dummy-Encoded Categorical Variables:
+airbnb_model_data <- bind_cols(
+  airbnb_numeric_scaled,
+  airbnb_categorical_dummies
+)
+
+# Check Final Modelling Dataset Dimensions:
+model_data_overview <- tibble(
+  Dataset = "Final modelling dataset",
+  Rows = nrow(airbnb_model_data),
+  Columns = ncol(airbnb_model_data)
+)
+
+# Output Final Modelling Dataset Overview in Copy-and-Paste Ready LaTeX:
+model_data_overview_latex <- model_data_overview |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Final Modelling Dataset After Categorical Consolidation and Dummy Encoding",
+    align = c("l", "r", "r"),
+    escape = TRUE
   ) |>
   kable_styling(
     latex_options = c("hold_position", "scale_down")
   )
 
-cat(missing_summary_latex)
-```
+cat(model_data_overview_latex)
 
-# Numeric Variable Summaries
-
-```{r numeric-distributions, fig.cap="Distributions of key numeric Airbnb listing variables."}
-# PLOT DISTRIBUTIONS OF KEY NUMERIC VARIABLES
-key_numeric <- c(
-  "price", "accommodates", "bathrooms", "bedrooms", "beds",
-  "number_of_reviews", "reviews_per_month", "review_scores_rating",
-  "availability_365", "booked_365", "revenue_365"
-)
-
-existing_key_numeric <- intersect(key_numeric, names(airbnb))
-
-airbnb %>%
-  select(all_of(existing_key_numeric)) %>%
-  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
-  ggplot(aes(x = value)) +
-  geom_histogram(bins = 30) +
-  facet_wrap(~variable, scales = "free", ncol = 3) +
-  labs(
-    x = NULL,
-    y = "Listings",
-    title = "Distributions of Key Numeric Variables"
-  ) +
-  theme_minimal()
-```
-
-```{r price-transformation-check, fig.cap="Raw and log-transformed price distributions."}
-# COMPARE RAW PRICE AND LOG PRICE DISTRIBUTIONS
-p1 <- airbnb %>%
-  ggplot(aes(x = price)) +
-  geom_histogram(bins = 40) +
-  labs(title = "Raw Price", x = "Price", y = "Listings") +
-  theme_minimal()
-
-p2 <- airbnb %>%
-  filter(!is.na(price), price > 0) %>%
-  mutate(log_price = log1p(price)) %>%
-  ggplot(aes(x = log_price)) +
-  geom_histogram(bins = 40) +
-  labs(title = "Log-Transformed Price", x = "log(1 + price)", y = "Listings") +
-  theme_minimal()
-
-p1 + p2
-```
-
-# Categorical Variable Summaries
-
-```{r categorical-frequency-tables}
-# CREATE FREQUENCY TABLES FOR MAIN CATEGORICAL VARIABLES
-cat_vars <- c(
-  "neighbourhood_cleansed",
-  "property_type_proper_trim",
-  "room_type_proper_trim"
-)
-
-existing_cat_vars <- intersect(cat_vars, names(airbnb))
-
-cat_frequency_tables <- airbnb %>%
-  select(all_of(existing_cat_vars)) %>%
-  pivot_longer(everything(), names_to = "variable", values_to = "category") %>%
-  count(variable, category, sort = TRUE) %>%
-  group_by(variable) %>%
-  mutate(pct = percent(n / sum(n), accuracy = 0.1)) %>%
-  slice_max(n, n = 10, with_ties = FALSE) %>%
-  ungroup()
-
-cat_frequency_tables %>%
-  kable(caption = "Top Categories for Main Categorical Variables") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"))
-```
-
-```{r categorical-frequency-plots, fig.cap="Top categories for main categorical Airbnb variables."}
-# VISUALISE TOP CATEGORIES FOR EACH MAIN CATEGORICAL VARIABLE
-cat_frequency_tables %>%
-  mutate(category = fct_reorder(category, n)) %>%
-  ggplot(aes(x = category, y = n)) +
-  geom_col() +
-  coord_flip() +
-  facet_wrap(~variable, scales = "free_y") +
-  labs(
-    x = NULL,
-    y = "Number of listings",
-    title = "Top Categories by Frequency"
-  ) +
-  theme_minimal()
 ```
 
 # Plausibility and Anomaly Checks
@@ -226,41 +694,6 @@ anomaly_summary <- anomaly_flags %>%
 
 anomaly_summary %>%
   kable(caption = "Plausibility and Anomaly Checks") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"))
-```
-
-```{r outlier-table}
-# IDENTIFY EXTREME VALUES USING THE 1.5 IQR RULE FOR SELECTED VARIABLES
-outlier_vars <- c(
-  "price", "accommodates", "bathrooms", "bedrooms", "beds",
-  "number_of_reviews", "reviews_per_month", "revenue_365"
-)
-
-existing_outlier_vars <- intersect(outlier_vars, names(airbnb))
-
-outlier_summary <- airbnb %>%
-  select(all_of(existing_outlier_vars)) %>%
-  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
-  group_by(variable) %>%
-  mutate(
-    q1 = quantile(value, 0.25, na.rm = TRUE),
-    q3 = quantile(value, 0.75, na.rm = TRUE),
-    iqr = q3 - q1,
-    lower_bound = q1 - 1.5 * iqr,
-    upper_bound = q3 + 1.5 * iqr,
-    is_outlier = value < lower_bound | value > upper_bound
-  ) %>%
-  summarise(
-    lower_bound = first(lower_bound),
-    upper_bound = first(upper_bound),
-    outlier_n = sum(is_outlier, na.rm = TRUE),
-    outlier_pct = percent(outlier_n / sum(!is.na(value)), accuracy = 0.1),
-    .groups = "drop"
-  )
-
-outlier_summary %>%
-  mutate(across(where(is.numeric), ~round(.x, 2))) %>%
-  kable(caption = "Potential Outliers Based on the 1.5 IQR Rule") %>%
   kable_styling(latex_options = c("hold_position", "scale_down"))
 ```
 
@@ -297,266 +730,6 @@ airbnb %>%
     title = "Spatial Distribution of Airbnb Listings"
   ) +
   theme_minimal()
-```
-
-```{r neighbourhood-level-averages}
-# CALCULATE NEIGHBOURHOOD / WARD LEVEL AVERAGES
-ward_level_averages <- airbnb %>%
-  group_by(neighbourhood_cleansed) %>%
-  summarise(
-    listings = n(),
-    avg_price = mean(price, na.rm = TRUE),
-    median_price = median(price, na.rm = TRUE),
-    avg_accommodates = mean(accommodates, na.rm = TRUE),
-    avg_review_rating = mean(review_scores_rating, na.rm = TRUE),
-    avg_availability_365 = mean(availability_365, na.rm = TRUE),
-    avg_booked_365 = mean(booked_365, na.rm = TRUE),
-    avg_revenue_365 = mean(revenue_365, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  arrange(desc(listings))
-
-ward_level_averages %>%
-  slice_head(n = 15) %>%
-  mutate(across(where(is.numeric), ~round(.x, 2))) %>%
-  kable(caption = "Neighbourhood / Ward-Level Averages for the Largest Listing Areas") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"))
-```
-
-```{r ward-price-plot, fig.cap="Average prices for neighbourhoods / wards with the most Airbnb listings."}
-# PLOT AVERAGE PRICE FOR THE LARGEST NEIGHBOURHOODS / WARDS
-ward_level_averages %>%
-  slice_max(listings, n = 15) %>%
-  mutate(neighbourhood_cleansed = fct_reorder(neighbourhood_cleansed, avg_price)) %>%
-  ggplot(aes(x = neighbourhood_cleansed, y = avg_price)) +
-  geom_col() +
-  coord_flip() +
-  labs(
-    x = NULL,
-    y = "Average price",
-    title = "Average Price by High-Volume Neighbourhood / Ward"
-  ) +
-  theme_minimal()
-```
-
-# Relationships Between Numeric Variables
-
-```{r correlation-matrix}
-# SELECT NUMERIC VARIABLES THAT ARE PLAUSIBLY USEFUL FOR CLUSTERING
-cluster_numeric_candidates <- airbnb %>%
-  select(
-    price, accommodates, bathrooms, bedrooms, beds,
-    booked_30, booked_60, booked_90, booked_365,
-    revenue_30, revenue_60, revenue_90, revenue_365,
-    availability_30, availability_60, availability_90, availability_365,
-    number_of_reviews, number_of_reviews_ltm, number_of_reviews_l30d,
-    review_scores_rating, review_scores_accuracy, review_scores_cleanliness,
-    review_scores_checkin, review_scores_communication,
-    review_scores_location, review_scores_value, reviews_per_month,
-    host_listings_count, host_total_listings_count
-  )
-
-cor_matrix <- cluster_numeric_candidates %>%
-  cor(use = "pairwise.complete.obs")
-
-round(cor_matrix, 2) %>%
-  kable(caption = "Correlation Matrix for Candidate Numeric Clustering Variables") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 6)
-```
-
-```{r correlation-plot, fig.cap="Correlation heatmap for candidate numeric clustering variables."}
-# VISUALISE CORRELATIONS AMONG CANDIDATE NUMERIC VARIABLES
-cor_df <- as.data.frame(as.table(cor_matrix)) %>%
-  rename(var1 = Var1, var2 = Var2, correlation = Freq)
-
-cor_df %>%
-  ggplot(aes(x = var1, y = var2, fill = correlation)) +
-  geom_tile() +
-  labs(
-    x = NULL,
-    y = NULL,
-    fill = "Correlation",
-    title = "Correlation Heatmap for Candidate Numeric Variables"
-  ) +
-  theme_minimal() +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 6),
-    axis.text.y = element_text(size = 6)
-  )
-```
-
-```{r scatterplot-sample, fig.cap="Pairwise relationships for selected transformed numeric variables."}
-# PLOT SELECTED PAIRWISE RELATIONSHIPS USING A SAMPLE
-set.seed(123)
-pair_data <- airbnb %>%
-  transmute(
-    log_price = log1p(price),
-    accommodates,
-    bedrooms,
-    availability_365,
-    booked_365,
-    log_reviews = log1p(number_of_reviews),
-    review_scores_rating
-  ) %>%
-  drop_na() %>%
-  slice_sample(n = min(1000, n()))
-
-ggpairs(pair_data)
-```
-
-# Optional Dimension Reduction Check
-
-```{r pca-prep}
-# PREPARE NUMERIC DATA FOR PCA DIAGNOSTIC ONLY
-pca_data <- airbnb %>%
-  transmute(
-    log_price = log1p(price),
-    accommodates,
-    bathrooms,
-    bedrooms,
-    beds,
-    availability_365,
-    booked_365,
-    log_reviews = log1p(number_of_reviews),
-    review_scores_rating,
-    reviews_per_month = log1p(reviews_per_month),
-    host_listings_count = log1p(host_listings_count)
-  ) %>%
-  drop_na()
-
-pca_fit <- prcomp(pca_data, center = TRUE, scale. = TRUE)
-
-pca_variance <- tibble(
-  component = paste0("PC", seq_along(pca_fit$sdev)),
-  variance_explained = pca_fit$sdev^2 / sum(pca_fit$sdev^2),
-  cumulative_variance = cumsum(variance_explained)
-)
-
-pca_variance %>%
-  mutate(across(where(is.numeric), ~percent(.x, accuracy = 0.1))) %>%
-  kable(caption = "PCA Variance Explained for Numeric Diagnostic Variables") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"))
-```
-
-```{r pca-scree, fig.cap="Scree plot showing cumulative variance explained by diagnostic principal components."}
-# SCREE PLOT FOR PCA DIAGNOSTIC
-pca_variance %>%
-  ggplot(aes(x = seq_along(variance_explained), y = cumulative_variance)) +
-  geom_line() +
-  geom_point() +
-  scale_y_continuous(labels = percent_format()) +
-  labs(
-    x = "Number of principal components",
-    y = "Cumulative variance explained",
-    title = "PCA Scree Plot"
-  ) +
-  theme_minimal()
-```
-
-# Pre-processing Specification for the Main Analysis
-
-Based on the EDA above, the following pre-processing steps should be applied before the clustering and SOM modelling stages.
-
-```{r preprocessing-pipeline}
-# CREATE MODELLING DATASET WITH CLEANED AND DERIVED VARIABLES
-model_data <- airbnb %>%
-  mutate(
-    # BASIC CLEANING FLAGS
-    valid_price = !is.na(price) & price > 0,
-    valid_accommodates = !is.na(accommodates) & accommodates > 0,
-    valid_coordinates = !is.na(latitude) & !is.na(longitude),
-    
-    # LOG TRANSFORM HEAVILY SKEWED MONETARY AND COUNT VARIABLES
-    log_price = log1p(price),
-    log_revenue_30 = log1p(revenue_30),
-    log_revenue_60 = log1p(revenue_60),
-    log_revenue_90 = log1p(revenue_90),
-    log_revenue_365 = log1p(revenue_365),
-    log_reviews = log1p(number_of_reviews),
-    log_reviews_ltm = log1p(number_of_reviews_ltm),
-    log_reviews_l30d = log1p(number_of_reviews_l30d),
-    log_reviews_per_month = log1p(reviews_per_month),
-    log_host_listings_count = log1p(host_listings_count),
-    
-    # CREATE OCCUPANCY / BOOKING INTENSITY FEATURES
-    booked_rate_30 = booked_30 / 30,
-    booked_rate_60 = booked_60 / 60,
-    booked_rate_90 = booked_90 / 90,
-    booked_rate_365 = booked_365 / 365,
-    availability_rate_365 = availability_365 / 365,
-    
-    # CONVERT CATEGORICAL VARIABLES TO FACTORS
-    neighbourhood_cleansed = as.factor(neighbourhood_cleansed),
-    property_type_proper_trim = as.factor(property_type_proper_trim),
-    room_type_proper_trim = as.factor(room_type_proper_trim)
-  ) %>%
-  filter(
-    valid_price,
-    valid_accommodates,
-    valid_coordinates,
-    !is.na(neighbourhood_cleansed),
-    !is.na(property_type_proper_trim),
-    !is.na(room_type_proper_trim)
-  )
-
-# COMBINE RARE CATEGORIES BEFORE DUMMY VARIABLE CREATION
-model_data <- model_data %>%
-  mutate(
-    property_type_grouped = fct_lump_min(property_type_proper_trim, min = 50, other_level = "Other"),
-    neighbourhood_grouped = fct_lump_min(neighbourhood_cleansed, min = 50, other_level = "Other")
-  )
-```
-
-```{r final-clustering-matrix}
-# SELECT VARIABLES FOR CLUSTERING AND SOM INPUT
-# EXCLUDE IDENTIFIERS, RAW TEXT FIELDS, URLS, HOST NAMES AND HIGHLY REDUNDANT RAW VARIABLES
-cluster_data <- model_data %>%
-  transmute(
-    log_price,
-    accommodates,
-    bathrooms,
-    bedrooms,
-    beds,
-    booked_rate_30,
-    booked_rate_90,
-    booked_rate_365,
-    availability_rate_365,
-    log_revenue_365,
-    log_reviews,
-    log_reviews_per_month,
-    review_scores_rating,
-    review_scores_cleanliness,
-    review_scores_location,
-    review_scores_value,
-    log_host_listings_count,
-    room_type_proper_trim,
-    property_type_grouped,
-    neighbourhood_grouped
-  )
-
-# CREATE DUMMY VARIABLES FOR CATEGORICAL INPUTS
-cluster_matrix <- cluster_data %>%
-  fastDummies::dummy_cols(
-    select_columns = c("room_type_proper_trim", "property_type_grouped", "neighbourhood_grouped"),
-    remove_first_dummy = TRUE,
-    remove_selected_columns = TRUE
-  ) %>%
-  drop_na()
-
-# STANDARDISE ALL VARIABLES SO THAT SCALE DOES NOT DRIVE DISTANCE-BASED METHODS
-cluster_matrix_scaled <- cluster_matrix %>%
-  mutate(across(everything(), scale))
-
-# FINAL MODELLING DIMENSION
-final_modelling_overview <- tibble(
-  final_rows = nrow(cluster_matrix_scaled),
-  final_columns = ncol(cluster_matrix_scaled),
-  missing_values_remaining = sum(is.na(cluster_matrix_scaled))
-)
-
-final_modelling_overview %>%
-  kable(caption = "Final Pre-processed Modelling Matrix Overview") %>%
-  kable_styling(latex_options = c("hold_position", "scale_down"))
 ```
 
 # Summary of Required Pre-processing

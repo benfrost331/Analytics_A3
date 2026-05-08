@@ -3,4 +3,8 @@ title: "HC"
 format: html
 editor: visual
 ---
-
+```{r}
+# Load Data:
+load("airbnbListings.RData")
+airBnb <- Airbnb_Excel_Lab_AAMB_Co
+```

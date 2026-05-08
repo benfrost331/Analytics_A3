@@ -1,5 +1,5 @@
 ---
-title: "SOM"
+title: "EDAandPP"
 format: html
 editor: visual
 ---
@@ -9,3 +9,4 @@ editor: visual
 load("airbnbListings.RData")
 airBnb <- Airbnb_Excel_Lab_AAMB_Co
 ```
+

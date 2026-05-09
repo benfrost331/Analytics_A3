@@ -4,32 +4,242 @@ format: html
 editor: visual
 ---
 
-# Hierarchical Clustering Analysis
+# Hierarchical Cluster Analysis
 
-```{r hc-setup}
+This section carries out agglomerative hierarchical clustering on the pre-processed Airbnb modelling dataset. The analysis follows the lecture methodology: first defining a dissimilarity matrix, then comparing linkage rules, assessing the dendrogram fit and candidate values of (K), cutting the tree, and finally profiling the resulting clusters.
+
+```{r setup}
+# Loading Required Packages:
+library(tidyverse)
+library(janitor)
+library(cluster)
+library(factoextra)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(patchwork)
+
 # Set Seed for Reproducibility:
-set.seed(2026)
+set.seed(123)
+```
 
-# Specify the Maximum Sample Size for Hierarchical Clustering:
-# Hierarchical clustering is computationally expensive for large datasets because it
-# requires a full pairwise distance matrix. A reproducible sample is therefore used.
-hc_sample_size <- min(3000, nrow(airbnb_model_data))
+## Data Loading and Pre-Processing
 
-# Create a Reproducible Sample of the Model-Ready Dataset:
-hc_sample_index <- sample(seq_len(nrow(airbnb_model_data)), size = hc_sample_size)
+The hierarchical clustering analysis uses the same model-ready dataset created during the EDA and pre-processing stage. The raw Airbnb data are loaded, identifiers, labels, derived variables and highly correlated variables are removed, skewed numeric variables are transformed, numeric variables are standardised, and the retained categorical variables are consolidated and dummy encoded.
 
-airbnb_hc_data <- airbnb_model_data |>
-  slice(hc_sample_index)
+```{r load-and-preprocess-data}
+# Loading the Raw Airbnb Data:
+load("airbnbListings.RData")
 
-# Check Dimensions of the Hierarchical Clustering Dataset:
-hc_data_overview <- tibble(
-  Dataset = "Hierarchical clustering sample",
-  Observations = nrow(airbnb_hc_data),
-  Variables = ncol(airbnb_hc_data)
+# Store and Clean the Raw Dataset:
+raw_data <- Airbnb_Excel_Lab_AAMB_Co
+
+airbnb <- raw_data |>
+  clean_names()
+
+# Remove Identifier, Label, Derived and Redundant Variables:
+derived_vars <- c(
+  "id",
+  "host_id",
+  "host_name_trimmed_proper",
+  "picture_url",
+  "neighbourhood_proper_trim",
+  "host_total_listings_count",
+  "room_type_proper_trim",
+  "bedrooms",
+  "booked_30",
+  "booked_60",
+  "booked_90",
+  "booked_365",
+  "revenue_30",
+  "revenue_60",
+  "revenue_90",
+  "revenue_365",
+  "availability_30",
+  "availability_60",
+  "availability_90",
+  "number_of_reviews_ltm",
+  "number_of_reviews_l30d",
+  "reviews_per_month"
 )
 
-# Output HC Dataset Overview Table:
-hc_data_overview_latex <- hc_data_overview |>
+airbnb_reduced <- airbnb |>
+  select(-any_of(derived_vars))
+
+# Remove Highly Correlated Numeric Variables:
+high_corr_vars <- c(
+  "beds",
+  "bathrooms",
+  "review_scores_accuracy",
+  "review_scores_cleanliness",
+  "review_scores_checkin",
+  "review_scores_communication",
+  "review_scores_location",
+  "review_scores_value"
+)
+
+airbnb_reduced <- airbnb_reduced |>
+  select(-any_of(high_corr_vars))
+
+# Retain Raw Variables for Cluster Profiling Later:
+airbnb_profile_data <- airbnb_reduced
+
+# Specify Numeric Variables to be Used for Modelling:
+numeric_model_vars <- c(
+  "host_listings_count",
+  "accommodates",
+  "price",
+  "availability_365",
+  "number_of_reviews",
+  "review_scores_rating"
+)
+
+# Specify Strongly Right-Skewed Variables for Log Transformation:
+log_transform_vars <- c(
+  "host_listings_count",
+  "price",
+  "number_of_reviews"
+)
+
+# Transform and Standardise Numeric Modelling Variables:
+airbnb_numeric_scaled <- airbnb_reduced |>
+  select(all_of(numeric_model_vars)) |>
+  mutate(
+    across(
+      all_of(log_transform_vars),
+      ~log1p(.x),
+      .names = "log_{.col}"
+    )
+  ) |>
+  select(-all_of(log_transform_vars)) |>
+  mutate(
+    across(
+      everything(),
+      ~as.numeric(scale(.x)),
+      .names = "scaled_{.col}"
+    )
+  ) |>
+  select(starts_with("scaled_"))
+
+# Rename Variables for Cleaner Modelling Output:
+names(airbnb_numeric_scaled) <- names(airbnb_numeric_scaled) |>
+  str_remove("^scaled_") |>
+  str_remove("^log_")
+
+# Consolidate Categorical Variables Before Dummy Encoding:
+n_major_neighbourhoods <- 10
+n_major_property_types <- 10
+
+major_neighbourhoods <- airbnb_reduced |>
+  count(neighbourhood_cleansed, sort = TRUE) |>
+  slice_head(n = n_major_neighbourhoods) |>
+  pull(neighbourhood_cleansed)
+
+major_property_types <- airbnb_reduced |>
+  count(property_type_proper_trim, sort = TRUE) |>
+  slice_head(n = n_major_property_types) |>
+  pull(property_type_proper_trim)
+
+airbnb_categorical_consolidated <- airbnb_reduced |>
+  mutate(
+    neighbourhood_grouped = if_else(
+      neighbourhood_cleansed %in% major_neighbourhoods,
+      neighbourhood_cleansed,
+      "Other"
+    ),
+    property_type_grouped = if_else(
+      property_type_proper_trim %in% major_property_types,
+      property_type_proper_trim,
+      "Other"
+    )
+  ) |>
+  select(
+    neighbourhood_grouped,
+    property_type_grouped
+  )
+
+# Dummy Encode the Consolidated Categorical Variables:
+airbnb_categorical_dummies <- model.matrix(
+  ~neighbourhood_grouped + property_type_grouped - 1,
+  data = airbnb_categorical_consolidated
+) |>
+  as.data.frame()
+
+# Clean Dummy Variable Names:
+names(airbnb_categorical_dummies) <- names(airbnb_categorical_dummies) |>
+  str_replace_all("neighbourhood_grouped", "neighbourhood_") |>
+  str_replace_all("property_type_grouped", "property_type_") |>
+  str_replace_all("[^A-Za-z0-9_]", "_") |>
+  str_replace_all("_+", "_") |>
+  str_remove("_$") |>
+  str_to_lower()
+
+# Combine Standardised Numeric Variables and Dummy-Encoded Categorical Variables:
+airbnb_model_data <- bind_cols(
+  airbnb_numeric_scaled,
+  airbnb_categorical_dummies
+)
+
+# Ensure the Modelling Dataset is Numeric and Complete:
+airbnb_model_data <- airbnb_model_data |>
+  mutate(across(everything(), as.numeric)) |>
+  drop_na()
+```
+
+```{r modelling-data-overview}
+# Create Modelling Dataset Overview:
+model_data_overview <- tibble(
+  Dataset = c("Raw Dataset", "Final Modelling Dataset"),
+  Observations = c(nrow(airbnb), nrow(airbnb_model_data)),
+  Variables = c(ncol(airbnb), ncol(airbnb_model_data))
+)
+
+# Output Model Data Overview Table:
+model_data_overview_latex <- model_data_overview |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Raw Dataset vs Final Modelling Dataset Used for Clustering",
+    align = c("l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(model_data_overview_latex)
+```
+
+## Hierarchical Clustering Sample
+
+Agglomerative hierarchical clustering requires a full pairwise distance matrix. Since the full dataset contains more than sixteen thousand listings, a reproducible sample is used for hierarchical clustering to keep the dendrogram and validation calculations computationally feasible. The sample is used only for the hierarchical clustering analysis.
+
+```{r hc-sample}
+# Specify Reproducible Sample Size for Hierarchical Clustering:
+hc_sample_size <- min(2500, nrow(airbnb_model_data))
+
+# Draw a Reproducible Sample:
+hc_sample_index <- sample(
+  seq_len(nrow(airbnb_model_data)),
+  size = hc_sample_size
+)
+
+# Create HC Modelling and Profiling Datasets:
+hc_data <- airbnb_model_data |>
+  slice(hc_sample_index)
+
+hc_profile_data <- airbnb_profile_data |>
+  slice(hc_sample_index)
+
+# Create Sample Overview Table:
+hc_sample_overview <- tibble(
+  Dataset = "Hierarchical clustering sample",
+  Observations = nrow(hc_data),
+  Variables = ncol(hc_data)
+)
+
+# Output Sample Overview Table:
+hc_sample_overview_latex <- hc_sample_overview |>
   kable(
     format = "latex",
     booktabs = TRUE,
@@ -41,54 +251,86 @@ hc_data_overview_latex <- hc_data_overview |>
     latex_options = c("hold_position", "scale_down")
   )
 
-cat(hc_data_overview_latex)
+cat(hc_sample_overview_latex)
 ```
 
+## Dissimilarity Matrix
+
+The first step in hierarchical clustering is to define a measure of dissimilarity between observations. Since the final modelling data are numeric and standardised, Euclidean distance is used as the primary dissimilarity measure:
+
+\[ d\_{ii'}=\sqrt{\sum_{j=1}^{p}(x_{ij}-x_{i'j})^2}. \]
 
 ```{r hc-distance-matrix}
 # Compute Euclidean Distance Matrix:
-hc_dist <- dist(
-  airbnb_hc_data,
+hc_dist_euclidean <- dist(
+  hc_data,
   method = "euclidean"
 )
 ```
 
+## Linkage Method Comparison
 
+Different agglomerative methods define the distance between clusters in different ways. The methods compared here are single linkage, complete linkage, average linkage, centroid linkage and Ward's method. The cophenetic correlation is used to assess how faithfully each dendrogram preserves the original pairwise distances.
 
-```{r hc-method-comparison}
-if (file.exists("HCMethodComparison.RData")) {
-  load("HCMethodComparison.RData")
-} else {
-  # Compare Hierarchical Clustering Linkage Methods:
-  hc_methods <- c("single", "complete", "average", "ward")
-  
-  # Calculate Agglomerative Coefficients for Each Method:
-  hc_method_comparison <- map_dfr(
-    hc_methods,
-    \(method_name) {
-      agnes_fit <- cluster::agnes(
-        airbnb_hc_data,
-        method = method_name,
-        metric = "euclidean"
+```{r hc-linkage-comparison}
+# Define Linkage Methods to Compare:
+hc_linkage_methods <- c(
+  "single",
+  "complete",
+  "average",
+  "centroid",
+  "ward.D2"
+)
+
+# Fit Hierarchical Clustering Models and Compute Cophenetic Correlations:
+hc_models <- map(
+  hc_linkage_methods,
+  \(method_name) {
+    hclust(
+      hc_dist_euclidean,
+      method = method_name
+    )
+  }
+)
+
+names(hc_models) <- hc_linkage_methods
+
+# Calculate Cophenetic Correlation for Each Linkage Method:
+hc_linkage_comparison <- map_dfr(
+  names(hc_models),
+  \(method_name) {
+    hc_fit <- hc_models[[method_name]]
+    
+    tibble(
+      Linkage_Method = method_name,
+      Cophenetic_Correlation = round(
+        cor(
+          hc_dist_euclidean,
+          cophenetic(hc_fit)
+        ),
+        3
       )
-      
-      tibble(
-        Method = str_to_title(method_name),
-        Agglomerative_Coefficient = round(agnes_fit$ac, 3)
-      )
-    }
-  )
-  
-  save(hc_method_comparison, file = "HCMethodComparison.RData")
-}
+    )
+  }
+) |>
+  mutate(
+    Linkage_Method = recode(
+      Linkage_Method,
+      "single" = "Single",
+      "complete" = "Complete",
+      "average" = "Average",
+      "centroid" = "Centroid",
+      "ward.D2" = "Ward.D2"
+    )
+  ) |>
+  arrange(desc(Cophenetic_Correlation))
 
-# Output Linkage Method Comparison Table:
-hc_method_comparison_latex <- hc_method_comparison |>
-  arrange(desc(Agglomerative_Coefficient)) |>
+# Output Linkage Comparison Table:
+hc_linkage_comparison_latex <- hc_linkage_comparison |>
   kable(
     format = "latex",
     booktabs = TRUE,
-    caption = "Comparison of Hierarchical Clustering Linkage Methods",
+    caption = "Cophenetic Correlation by Hierarchical Linkage Method",
     align = c("l", "r"),
     escape = TRUE
   ) |>
@@ -96,108 +338,254 @@ hc_method_comparison_latex <- hc_method_comparison |>
     latex_options = c("hold_position", "scale_down")
   )
 
-cat(hc_method_comparison_latex)
+cat(hc_linkage_comparison_latex)
 ```
 
+```{r hc-dendrogram-comparison, fig.cap="Dendrograms for selected hierarchical linkage methods."}
+# Plot Dendrograms for Main Linkage Methods:
+par(mfrow = c(2, 2))
 
-```{r hc-ward-model}
-# Fit Hierarchical Clustering Model using Ward's Method:
-hc_ward <- hclust(
-  hc_dist,
-  method = "ward.D2"
-)
-```
-
-
-
-```{r hc-dendrogram, fig.cap="Dendrogram from Ward hierarchical clustering on the Airbnb modelling sample."}
-# Plot Dendrogram:
 plot(
-  hc_ward,
+  hc_models[["single"]],
   labels = FALSE,
-  hang = -1,
-  main = "Hierarchical Clustering Dendrogram",
-  xlab = "Airbnb Listings",
+  main = "Single Linkage",
+  xlab = "Listings",
   ylab = "Height"
 )
+
+plot(
+  hc_models[["complete"]],
+  labels = FALSE,
+  main = "Complete Linkage",
+  xlab = "Listings",
+  ylab = "Height"
+)
+
+plot(
+  hc_models[["average"]],
+  labels = FALSE,
+  main = "Average Linkage",
+  xlab = "Listings",
+  ylab = "Height"
+)
+
+plot(
+  hc_models[["ward.D2"]],
+  labels = FALSE,
+  main = "Ward.D2 Linkage",
+  xlab = "Listings",
+  ylab = "Height"
+)
+
+par(mfrow = c(1, 1))
 ```
 
+Although the cophenetic correlation measures distance preservation, the final method is selected with the substantive goal of obtaining compact and interpretable clusters. Ward's method is therefore used for the final hierarchical clustering solution because it tends to produce compact clusters by merging observations in a way that limits increases in within-cluster variation.
 
-```{r hc-silhouette-analysis}
-# Evaluate Candidate Numbers of Clusters using Average Silhouette Width:
-candidate_k <- 2:8
+```{r hc-final-method}
+# Select Final Linkage Method:
+hc_final_method <- "ward.D2"
 
-hc_silhouette_summary <- map_dfr(
-  candidate_k,
+# Extract Final Hierarchical Clustering Model:
+hc_final <- hc_models[[hc_final_method]]
+```
+
+## Choosing the Number of Clusters
+
+The dendrogram does not automatically determine a single correct number of clusters. Candidate values of (K) are therefore compared using within-cluster variation and average silhouette width. The final cut is based primarily on silhouette width, supported by the dendrogram and interpretability of the cluster profiles.
+
+```{r hc-k-evaluation}
+# Candidate Cluster Numbers:
+k_values <- 2:8
+
+# Function for Calculating Total Within-Cluster Variation:
+within_variation_manual <- function(X, cluster) {
+  clusters <- sort(unique(cluster))
+  total_within <- 0
+  
+  for (k in clusters) {
+    Xk <- X[cluster == k, , drop = FALSE]
+    centroid <- colMeans(Xk)
+    squared_distances <- rowSums((sweep(Xk, 2, centroid, "-"))^2)
+    total_within <- total_within + sum(squared_distances)
+  }
+  
+  total_within
+}
+
+# Evaluate Candidate K Values:
+hc_k_evaluation <- map_dfr(
+  k_values,
   \(k) {
-    cluster_assignments <- cutree(hc_ward, k = k)
-    
-    sil <- cluster::silhouette(
-      cluster_assignments,
-      hc_dist
-    )
+    cluster_k <- cutree(hc_final, k = k)
+    sil_k <- silhouette(cluster_k, hc_dist_euclidean)
     
     tibble(
-      Clusters = k,
-      Average_Silhouette_Width = round(mean(sil[, "sil_width"]), 3)
+      K = k,
+      Total_Within_Variation = round(
+        within_variation_manual(as.matrix(hc_data), cluster_k),
+        2
+      ),
+      Average_Silhouette_Width = round(
+        mean(sil_k[, "sil_width"]),
+        3
+      )
     )
   }
 )
 
-# Output Silhouette Summary Table:
-hc_silhouette_latex <- hc_silhouette_summary |>
-  arrange(desc(Average_Silhouette_Width)) |>
+# Select K with Highest Average Silhouette Width:
+hc_best_k <- hc_k_evaluation |>
+  slice_max(
+    Average_Silhouette_Width,
+    n = 1,
+    with_ties = FALSE
+  ) |>
+  pull(K)
+
+# Output K Evaluation Table:
+hc_k_evaluation_latex <- hc_k_evaluation |>
   kable(
     format = "latex",
     booktabs = TRUE,
-    caption = "Hierarchical Clustering Silhouette Analysis",
-    align = c("r", "r"),
+    caption = "Evaluation of Candidate Hierarchical Clustering Solutions",
+    align = c("r", "r", "r"),
     escape = TRUE
   ) |>
   kable_styling(
     latex_options = c("hold_position", "scale_down")
   )
 
-cat(hc_silhouette_latex)
-
-# Select the Number of Clusters with the Highest Average Silhouette Width:
-hc_best_k <- hc_silhouette_summary |>
-  slice_max(Average_Silhouette_Width, n = 1, with_ties = FALSE) |>
-  pull(Clusters)
+cat(hc_k_evaluation_latex)
 ```
 
+```{r hc-k-evaluation-plots, fig.cap="Within-cluster variation and average silhouette width for candidate hierarchical clustering solutions."}
+# Set Plot Text Sizes:
+plot_title_size <- 14
+axis_title_size <- 12
+axis_text_size <- 10
 
-```{r hc-silhouette-plot, fig.cap="Average silhouette width for candidate hierarchical clustering solutions."}
-# Plot Average Silhouette Width by Number of Clusters:
-hc_silhouette_summary |>
-  ggplot(aes(x = Clusters, y = Average_Silhouette_Width)) +
+# Plot Within-Cluster Variation:
+hc_wv_plot <- hc_k_evaluation |>
+  ggplot(aes(x = K, y = Total_Within_Variation)) +
   geom_line() +
   geom_point(size = 2) +
-  scale_x_continuous(breaks = candidate_k) +
+  scale_x_continuous(breaks = k_values) +
   labs(
-    x = "Number of Clusters",
-    y = "Average Silhouette Width",
-    title = "Hierarchical Clustering: Silhouette-Based Choice of k"
+    x = "Number of Clusters (K)",
+    y = "Total Within-Cluster Variation",
+    title = "Within-Cluster Variation"
   ) +
-  theme_minimal()
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = plot_title_size, face = "bold"),
+    axis.title = element_text(size = axis_title_size),
+    axis.text = element_text(size = axis_text_size)
+  )
+
+# Plot Average Silhouette Width:
+hc_sil_plot <- hc_k_evaluation |>
+  ggplot(aes(x = K, y = Average_Silhouette_Width)) +
+  geom_line() +
+  geom_point(size = 2) +
+  geom_vline(xintercept = hc_best_k, linetype = "dashed") +
+  scale_x_continuous(breaks = k_values) +
+  labs(
+    x = "Number of Clusters (K)",
+    y = "Average Silhouette Width",
+    title = "Average Silhouette Width"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = plot_title_size, face = "bold"),
+    axis.title = element_text(size = axis_title_size),
+    axis.text = element_text(size = axis_text_size)
+  )
+
+hc_wv_plot + hc_sil_plot
 ```
 
+```{r hc-gap-statistic}
+# Gap Statistic for Hierarchical Clustering:
+# B is kept modest for runtime. Increase B for a more stable final report if time permits.
+hc_gap_fun <- function(x, k) {
+  hc_gap_fit <- hclust(
+    dist(x, method = "euclidean"),
+    method = hc_final_method
+  )
+  
+  list(
+    cluster = cutree(hc_gap_fit, k = k)
+  )
+}
+
+set.seed(123)
+
+hc_gap <- clusGap(
+  x = as.matrix(hc_data),
+  FUNcluster = hc_gap_fun,
+  K.max = max(k_values),
+  B = 10
+)
+
+# Convert Gap Statistic Output to Table:
+hc_gap_table <- as_tibble(hc_gap$Tab, rownames = "K") |>
+  mutate(
+    K = as.integer(K),
+    gap = round(gap, 3),
+    SE_sim = round(SE.sim, 3)
+  ) |>
+  select(
+    K,
+    Gap = gap,
+    SE = SE_sim
+  )
+
+# Output Gap Statistic Table:
+hc_gap_table_latex <- hc_gap_table |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Gap Statistic for Hierarchical Clustering",
+    align = c("r", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(hc_gap_table_latex)
+```
+
+```{r hc-gap-plot, fig.cap="Gap statistic for hierarchical clustering."}
+# Plot Gap Statistic:
+fviz_gap_stat(hc_gap)
+```
+
+## Final Hierarchical Clustering Solution
+
+The final dendrogram is cut at the selected value of (K), and the resulting cluster assignments are used for cluster profiling.
 
 ```{r hc-final-clusters}
-# Cut the Dendrogram to Obtain the Final Hierarchical Clusters:
-hc_cluster_assignments <- cutree(
-  hc_ward,
+# Cut the Final Dendrogram:
+hc_cluster <- cutree(
+  hc_final,
   k = hc_best_k
 )
 
-# Add Cluster Assignments to the Sampled Modelling Dataset:
-airbnb_hc_clustered <- airbnb_hc_data |>
+# Add Cluster Assignments to Modelling and Profiling Data:
+hc_clustered_data <- hc_data |>
   mutate(
-    HC_Cluster = factor(hc_cluster_assignments)
+    HC_Cluster = factor(hc_cluster)
   )
 
-# Create Cluster Size Table:
-hc_cluster_sizes <- airbnb_hc_clustered |>
+hc_profile_clustered <- hc_profile_data |>
+  mutate(
+    HC_Cluster = factor(hc_cluster)
+  )
+
+# Cluster Size Table:
+hc_cluster_sizes <- hc_profile_clustered |>
   count(HC_Cluster, name = "N_Listings") |>
   mutate(
     Percentage = percent(N_Listings / sum(N_Listings), accuracy = 0.1)
@@ -219,47 +607,46 @@ hc_cluster_sizes_latex <- hc_cluster_sizes |>
 cat(hc_cluster_sizes_latex)
 ```
 
+```{r hc-final-dendrogram, fig.cap="Final Ward hierarchical clustering dendrogram with selected cluster cut."}
+# Plot Final Dendrogram with Cluster Cut:
+plot(
+  hc_final,
+  labels = FALSE,
+  hang = -1,
+  main = paste0("Ward.D2 Hierarchical Clustering Dendrogram, K = ", hc_best_k),
+  xlab = "Airbnb Listings",
+  ylab = "Height"
+)
 
-
-```{r hc-cluster-profile-standardised}
-# Profile Clusters using the Standardised Modelling Variables:
-hc_cluster_profile <- airbnb_hc_clustered |>
-  group_by(HC_Cluster) |>
-  summarise(
-    across(
-      where(is.numeric),
-      ~round(mean(.x, na.rm = TRUE), 2)
-    ),
-    .groups = "drop"
-  )
-
-# Output Cluster Profile Table:
-hc_cluster_profile_latex <- hc_cluster_profile |>
-  kable(
-    format = "latex",
-    booktabs = TRUE,
-    caption = "Hierarchical Clustering Profile Based on Standardised Modelling Variables",
-    align = "r",
-    escape = TRUE
-  ) |>
-  kable_styling(
-    latex_options = c("hold_position", "scale_down")
-  )
-
-cat(hc_cluster_profile_latex)
+rect.hclust(
+  hc_final,
+  k = hc_best_k,
+  border = seq_len(hc_best_k) + 1
+)
 ```
 
+```{r hc-final-silhouette, fig.cap="Silhouette plot for the final hierarchical clustering solution."}
+# Compute and Plot Final Silhouette Values:
+hc_final_silhouette <- silhouette(
+  hc_cluster,
+  hc_dist_euclidean
+)
 
-```{r hc-cluster-profile-readable}
-# Create a More Interpretable Cluster Profile using the Original Retained Variables:
-airbnb_hc_readable <- airbnb_reduced |>
-  slice(hc_sample_index) |>
-  mutate(
-    HC_Cluster = factor(hc_cluster_assignments)
-  )
+plot(
+  hc_final_silhouette,
+  col = seq_len(hc_best_k) + 1,
+  border = NA,
+  main = "Silhouette Plot for Final HC Solution"
+)
+```
 
-# Summarise Main Numeric Variables by Cluster:
-hc_readable_numeric_profile <- airbnb_hc_readable |>
+## Cluster Profiling
+
+The cluster analysis itself was performed on transformed, standardised and dummy-encoded variables. However, cluster interpretation is clearer using the retained variables in their original units.
+
+```{r hc-numeric-cluster-profile}
+# Numeric Cluster Profile in Original Units:
+hc_numeric_profile <- hc_profile_clustered |>
   group_by(HC_Cluster) |>
   summarise(
     Listings = n(),
@@ -273,12 +660,12 @@ hc_readable_numeric_profile <- airbnb_hc_readable |>
     .groups = "drop"
   )
 
-# Output Interpretable Numeric Cluster Profile:
-hc_readable_numeric_latex <- hc_readable_numeric_profile |>
+# Output Numeric Cluster Profile:
+hc_numeric_profile_latex <- hc_numeric_profile |>
   kable(
     format = "latex",
     booktabs = TRUE,
-    caption = "Interpretable Numeric Profile of Hierarchical Clusters",
+    caption = "Numeric Profile of Hierarchical Clusters in Original Units",
     align = "r",
     escape = TRUE
   ) |>
@@ -286,22 +673,26 @@ hc_readable_numeric_latex <- hc_readable_numeric_profile |>
     latex_options = c("hold_position", "scale_down")
   )
 
-cat(hc_readable_numeric_latex)
+cat(hc_numeric_profile_latex)
 ```
 
+```{r hc-categorical-cluster-profile}
+# Helper Function for Most Common Category:
+most_common <- function(x) {
+  names(sort(table(x), decreasing = TRUE))[1]
+}
 
-```{r hc-cluster-category-profile}
-# Identify the Most Common Neighbourhood and Property Type per Cluster:
-hc_readable_category_profile <- airbnb_hc_readable |>
+# Categorical Cluster Profile:
+hc_categorical_profile <- hc_profile_clustered |>
   group_by(HC_Cluster) |>
   summarise(
-    Most_Common_Neighbourhood = names(sort(table(neighbourhood_cleansed), decreasing = TRUE))[1],
-    Most_Common_Property_Type = names(sort(table(property_type_proper_trim), decreasing = TRUE))[1],
+    Most_Common_Neighbourhood = most_common(neighbourhood_cleansed),
+    Most_Common_Property_Type = most_common(property_type_proper_trim),
     .groups = "drop"
   )
 
 # Output Categorical Cluster Profile:
-hc_readable_category_latex <- hc_readable_category_profile |>
+hc_categorical_profile_latex <- hc_categorical_profile |>
   kable(
     format = "latex",
     booktabs = TRUE,
@@ -313,50 +704,108 @@ hc_readable_category_latex <- hc_readable_category_profile |>
     latex_options = c("hold_position", "scale_down")
   )
 
-cat(hc_readable_category_latex)
+cat(hc_categorical_profile_latex)
 ```
 
+```{r hc-standardised-profile-plot, fig.cap="Mean standardised modelling-variable profiles by hierarchical cluster."}
+# Create Mean Standardised Profile by Cluster:
+hc_standardised_profile <- hc_clustered_data |>
+  group_by(HC_Cluster) |>
+  summarise(
+    across(
+      where(is.numeric),
+      ~mean(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  ) |>
+  pivot_longer(
+    cols = -HC_Cluster,
+    names_to = "Variable",
+    values_to = "Mean_Standardised_Value"
+  )
 
-```{r hc-cluster-pca-plot, fig.cap="Two-dimensional PCA visualisation of the hierarchical clustering solution."}
-# Create PCA Projection for Visualising Hierarchical Clusters:
+# Plot Standardised Cluster Profiles:
+hc_standardised_profile |>
+  ggplot(aes(
+    x = Variable,
+    y = Mean_Standardised_Value,
+    group = HC_Cluster,
+    colour = HC_Cluster
+  )) +
+  geom_line() +
+  geom_point(size = 1.6) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Mean Standardised Value",
+    colour = "HC Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 9),
+    axis.title = element_text(size = 11),
+    legend.position = "bottom"
+  )
+```
+
+## PCA Visualisation of the Hierarchical Clusters
+
+PCA is used here only as a two-dimensional visualisation device. The clustering itself was performed on the full model-ready feature space.
+
+```{r hc-pca-visualisation, fig.cap="Two-dimensional PCA visualisation of the final hierarchical clustering solution."}
+# Compute PCA Scores for Visualisation:
 hc_pca <- prcomp(
-  airbnb_hc_data,
+  hc_data,
   center = FALSE,
   scale. = FALSE
 )
 
 hc_pca_plot_data <- as_tibble(hc_pca$x[, 1:2]) |>
   mutate(
-    HC_Cluster = factor(hc_cluster_assignments)
+    HC_Cluster = factor(hc_cluster)
   )
 
-# Plot the First Two Principal Components Coloured by HC Cluster:
+# Plot PCA Projection by Cluster:
 hc_pca_plot_data |>
   ggplot(aes(x = PC1, y = PC2, colour = HC_Cluster)) +
-  geom_point(alpha = 0.6, size = 1.2) +
+  geom_point(alpha = 0.65, size = 1.2) +
   labs(
     x = "Principal Component 1",
     y = "Principal Component 2",
-    colour = "HC Cluster",
-    title = "PCA Visualisation of Hierarchical Clusters"
+    colour = "HC Cluster"
   ) +
-  theme_minimal()
+  theme_minimal() +
+  theme(
+    legend.position = "bottom"
+  )
 ```
 
+## Save Hierarchical Clustering Outputs
 
-```{r hc-save-results}
-# Save Final Hierarchical Clustering Outputs for Later Comparison:
+```{r save-hc-results}
+# Save Objects for Later Non-Hierarchical and SOM Comparison:
 hc_results <- list(
-  data = airbnb_hc_data,
-  distance_matrix = hc_dist,
-  model = hc_ward,
+  sample_index = hc_sample_index,
+  model_data = hc_data,
+  profile_data = hc_profile_clustered,
+  distance_matrix = hc_dist_euclidean,
+  linkage_models = hc_models,
+  linkage_comparison = hc_linkage_comparison,
+  final_method = hc_final_method,
+  final_model = hc_final,
+  k_evaluation = hc_k_evaluation,
+  gap = hc_gap,
   best_k = hc_best_k,
-  clusters = hc_cluster_assignments,
-  clustered_data = airbnb_hc_clustered,
-  readable_clustered_data = airbnb_hc_readable,
-  silhouette_summary = hc_silhouette_summary,
+  clusters = hc_cluster,
   cluster_sizes = hc_cluster_sizes,
-  numeric_profile = hc_readable_numeric_profile,
-  category_profile = hc_readable_category_profile
+  numeric_profile = hc_numeric_profile,
+  categorical_profile = hc_categorical_profile,
+  silhouette = hc_final_silhouette
+)
+
+saveRDS(
+  hc_results,
+  file = "hc_results_airbnb.rds"
 )
 ```

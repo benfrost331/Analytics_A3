@@ -20,7 +20,7 @@ library(kableExtra)
 library(patchwork)
 
 # Set Seed for Reproducibility:
-set.seed(123)
+set.seed(2026)
 ```
 
 ## Data Loading and Pre-Processing
@@ -380,7 +380,7 @@ plot(
 par(mfrow = c(1, 1))
 ```
 
-Although the cophenetic correlation measures distance preservation, the final method is selected with the substantive goal of obtaining compact and interpretable clusters. Ward's method is therefore used for the final hierarchical clustering solution because it tends to produce compact clusters by merging observations in a way that limits increases in within-cluster variation.
+Although the cophenetic correlation measures distance preservation, the final method is selected with the substantive goal of obtaining compact and interpretable clusters.
 
 ```{r hc-final-method}
 # Select Final Linkage Method:
@@ -434,14 +434,8 @@ hc_k_evaluation <- map_dfr(
   }
 )
 
-# Select K with Highest Average Silhouette Width:
-hc_best_k <- hc_k_evaluation |>
-  slice_max(
-    Average_Silhouette_Width,
-    n = 1,
-    with_ties = FALSE
-  ) |>
-  pull(K)
+# Select K:
+hc_best_k = 3
 
 # Output K Evaluation Table:
 hc_k_evaluation_latex <- hc_k_evaluation |>
@@ -470,11 +464,11 @@ hc_wv_plot <- hc_k_evaluation |>
   ggplot(aes(x = K, y = Total_Within_Variation)) +
   geom_line() +
   geom_point(size = 2) +
+  geom_vline(xintercept = hc_best_k, linetype = "dashed") +
   scale_x_continuous(breaks = k_values) +
   labs(
     x = "Number of Clusters (K)",
-    y = "Total Within-Cluster Variation",
-    title = "Within-Cluster Variation"
+    y = "Total Within-Cluster Variation"
   ) +
   theme_minimal() +
   theme(
@@ -492,8 +486,7 @@ hc_sil_plot <- hc_k_evaluation |>
   scale_x_continuous(breaks = k_values) +
   labs(
     x = "Number of Clusters (K)",
-    y = "Average Silhouette Width",
-    title = "Average Silhouette Width"
+    y = "Average Silhouette Width"
   ) +
   theme_minimal() +
   theme(
@@ -502,64 +495,8 @@ hc_sil_plot <- hc_k_evaluation |>
     axis.text = element_text(size = axis_text_size)
   )
 
-hc_wv_plot + hc_sil_plot
-```
-
-```{r hc-gap-statistic}
-# Gap Statistic for Hierarchical Clustering:
-# B is kept modest for runtime. Increase B for a more stable final report if time permits.
-hc_gap_fun <- function(x, k) {
-  hc_gap_fit <- hclust(
-    dist(x, method = "euclidean"),
-    method = hc_final_method
-  )
-  
-  list(
-    cluster = cutree(hc_gap_fit, k = k)
-  )
-}
-
-set.seed(123)
-
-hc_gap <- clusGap(
-  x = as.matrix(hc_data),
-  FUNcluster = hc_gap_fun,
-  K.max = max(k_values),
-  B = 10
-)
-
-# Convert Gap Statistic Output to Table:
-hc_gap_table <- as_tibble(hc_gap$Tab, rownames = "K") |>
-  mutate(
-    K = as.integer(K),
-    gap = round(gap, 3),
-    SE_sim = round(SE.sim, 3)
-  ) |>
-  select(
-    K,
-    Gap = gap,
-    SE = SE_sim
-  )
-
-# Output Gap Statistic Table:
-hc_gap_table_latex <- hc_gap_table |>
-  kable(
-    format = "latex",
-    booktabs = TRUE,
-    caption = "Gap Statistic for Hierarchical Clustering",
-    align = c("r", "r", "r"),
-    escape = TRUE
-  ) |>
-  kable_styling(
-    latex_options = c("hold_position", "scale_down")
-  )
-
-cat(hc_gap_table_latex)
-```
-
-```{r hc-gap-plot, fig.cap="Gap statistic for hierarchical clustering."}
-# Plot Gap Statistic:
-fviz_gap_stat(hc_gap)
+hc_sil_plot
+hc_wv_plot
 ```
 
 ## Final Hierarchical Clustering Solution
@@ -795,7 +732,6 @@ hc_results <- list(
   final_method = hc_final_method,
   final_model = hc_final,
   k_evaluation = hc_k_evaluation,
-  gap = hc_gap,
   best_k = hc_best_k,
   clusters = hc_cluster,
   cluster_sizes = hc_cluster_sizes,

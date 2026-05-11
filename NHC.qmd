@@ -4,3 +4,407 @@ format: html
 editor: visual
 ---
 
+# Non-Hierarchical Cluster Analysis
+
+Non-hierarchical clustering was performed using the K-means algorithm. Unlike hierarchical clustering, K-means partitions observations into a pre-specified number of clusters by iteratively minimising within-cluster variation. The algorithm seeks to minimise the within-cluster sum of squares (WCSS), thereby producing clusters whose members are as similar as possible.
+
+The non-hierarchical clustering analysis uses the same model-ready dataset created during the EDA and pre-processing stage. The raw Airbnb data are loaded, identifiers, labels, derived variables and highly correlated variables are removed, skewed numeric variables are transformed, numeric variables are standardised, and the retained categorical variables are consolidated and dummy encoded.
+
+\^\^\^ Copied from HC
+
+## Data loading and preprocessing
+
+```{r load-and-preprocess-data}
+# Loading the Raw Airbnb Data:
+load("airbnbListings.RData")
+
+# Store and Clean the Raw Dataset:
+raw_data <- Airbnb_Excel_Lab_AAMB_Co
+
+airbnb <- raw_data |>
+  clean_names()
+
+# Remove Identifier, Label, Derived and Redundant Variables:
+derived_vars <- c(
+  "id",
+  "host_id",
+  "host_name_trimmed_proper",
+  "picture_url",
+  "neighbourhood_proper_trim",
+  "host_total_listings_count",
+  "room_type_proper_trim",
+  "bedrooms",
+  "booked_30",
+  "booked_60",
+  "booked_90",
+  "booked_365",
+  "revenue_30",
+  "revenue_60",
+  "revenue_90",
+  "revenue_365",
+  "availability_30",
+  "availability_60",
+  "availability_90",
+  "number_of_reviews_ltm",
+  "number_of_reviews_l30d",
+  "reviews_per_month"
+)
+
+airbnb_reduced <- airbnb |>
+  select(-any_of(derived_vars))
+
+# Remove Highly Correlated Numeric Variables:
+high_corr_vars <- c(
+  "beds",
+  "bathrooms",
+  "review_scores_accuracy",
+  "review_scores_cleanliness",
+  "review_scores_checkin",
+  "review_scores_communication",
+  "review_scores_location",
+  "review_scores_value"
+)
+
+airbnb_reduced <- airbnb_reduced |>
+  select(-any_of(high_corr_vars))
+
+# Retain Raw Variables for Cluster Profiling Later:
+airbnb_profile_data <- airbnb_reduced
+
+# Specify Numeric Variables to be Used for Modelling:
+numeric_model_vars <- c(
+  "host_listings_count",
+  "accommodates",
+  "price",
+  "availability_365",
+  "number_of_reviews",
+  "review_scores_rating"
+)
+
+# Specify Strongly Right-Skewed Variables for Log Transformation:
+log_transform_vars <- c(
+  "host_listings_count",
+  "price",
+  "number_of_reviews"
+)
+
+# Transform and Standardise Numeric Modelling Variables:
+airbnb_numeric_scaled <- airbnb_reduced |>
+  select(all_of(numeric_model_vars)) |>
+  mutate(
+    across(
+      all_of(log_transform_vars),
+      ~log1p(.x),
+      .names = "log_{.col}"
+    )
+  ) |>
+  select(-all_of(log_transform_vars)) |>
+  mutate(
+    across(
+      everything(),
+      ~as.numeric(scale(.x)),
+      .names = "scaled_{.col}"
+    )
+  ) |>
+  select(starts_with("scaled_"))
+
+# Rename Variables for Cleaner Modelling Output:
+names(airbnb_numeric_scaled) <- names(airbnb_numeric_scaled) |>
+  str_remove("^scaled_") |>
+  str_remove("^log_")
+
+# Consolidate Categorical Variables Before Dummy Encoding:
+n_major_neighbourhoods <- 10
+n_major_property_types <- 10
+
+major_neighbourhoods <- airbnb_reduced |>
+  dplyr::count(neighbourhood_cleansed, sort = TRUE) |>
+  slice_head(n = n_major_neighbourhoods) |>
+  pull(neighbourhood_cleansed)
+
+major_property_types <- airbnb_reduced |>
+  dplyr::count(property_type_proper_trim, sort = TRUE) |>
+  slice_head(n = n_major_property_types) |>
+  pull(property_type_proper_trim)
+
+airbnb_categorical_consolidated <- airbnb_reduced |>
+  mutate(
+    neighbourhood_grouped = if_else(
+      neighbourhood_cleansed %in% major_neighbourhoods,
+      neighbourhood_cleansed,
+      "Other"
+    ),
+    property_type_grouped = if_else(
+      property_type_proper_trim %in% major_property_types,
+      property_type_proper_trim,
+      "Other"
+    )
+  ) |>
+  select(
+    neighbourhood_grouped,
+    property_type_grouped
+  )
+
+# Dummy Encode the Consolidated Categorical Variables:
+airbnb_categorical_dummies <- model.matrix(
+  ~neighbourhood_grouped + property_type_grouped - 1,
+  data = airbnb_categorical_consolidated
+) |>
+  as.data.frame()
+
+# Clean Dummy Variable Names:
+names(airbnb_categorical_dummies) <- names(airbnb_categorical_dummies) |>
+  str_replace_all("neighbourhood_grouped", "neighbourhood_") |>
+  str_replace_all("property_type_grouped", "property_type_") |>
+  str_replace_all("[^A-Za-z0-9_]", "_") |>
+  str_replace_all("_+", "_") |>
+  str_remove("_$") |>
+  str_to_lower()
+
+# Combine Standardised Numeric Variables and Dummy-Encoded Categorical Variables:
+airbnb_model_data <- bind_cols(
+  airbnb_numeric_scaled,
+  airbnb_categorical_dummies
+)
+
+# Ensure the Modelling Dataset is Numeric and Complete:
+airbnb_model_data <- airbnb_model_data |>
+  mutate(across(everything(), as.numeric)) |>
+  drop_na()
+```
+
+## K-means
+
+```{r}
+set.seed(123)
+
+km <- vector('list', 8)
+nstart <- 25
+
+for (i in 1:8) {
+  km[[i]] <- kmeans(airbnb_numeric_scaled, i, nstart=nstart, iter.max = 100)   
+}
+
+wcss <- sapply(km, function(x) x$tot.withinss)
+
+silhouette_scores <- sapply(
+  2:8,
+  function(k) {
+    sil <- silhouette(
+      km[[k]]$cluster,
+      dist(airbnb_numeric_scaled)
+    )
+    mean(sil[, 3])
+  }
+)
+
+# Create dataframe for plotting
+elbow_df <- data.frame(
+  k = 1:8,
+  WCSS = wcss
+)
+
+sil_df <- data.frame(
+  k = 2:8,
+  silhouette = silhouette_scores)
+
+k_optimal <- 4
+
+# Elbow plot
+elbow_plot <- ggplot(elbow_df, aes(x = k, y = WCSS)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  scale_x_continuous(breaks = 1:8) +
+  labs(
+    title = "Elbow Method for K-means Clustering",
+    x = "Number of Clusters (k)",
+    y = "Within-Cluster Sum of Squares (WCSS)") + theme_minimal() + 
+    geom_vline(
+  xintercept = k_optimal,
+  linetype = "dashed",
+  linewidth = 0.8
+)
+
+silhouette_plot <- ggplot(sil_df, aes(x = k, y = silhouette)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  geom_vline(
+  xintercept = k_optimal,
+  linetype = "dashed",
+  linewidth = 0.8
+) +
+  scale_x_continuous(breaks = 2:8) +
+  
+  labs(
+    title = "Average Silhouette Width",
+    x = "Number of Clusters (k)",
+    y = "Average Silhouette Width"
+  ) +
+  theme_minimal()
+
+elbow_plot + silhouette_plot
+
+airbnb_clustered_kmeans <- airbnb_reduced |>
+  mutate(kmeans_cluster = factor(km[[k_optimal]]$cluster))
+
+library(sf)
+
+airbnb_sf_kmeans <- st_as_sf(
+  airbnb_clustered_kmeans,
+  coords = c("longitude", "latitude"),
+  crs = 4326
+)
+
+library(tmap)
+
+tm_shape(airbnb_sf_kmeans) +
+  
+  tm_basemap("CartoDB.Positron") +
+  
+  tm_dots(
+    col = "kmeans_cluster",
+    size = 0.04,
+    alpha = 0.85,
+    palette = "Set1",
+    title = "K-Means Cluster",
+    textNA = "") +
+  
+  tm_layout(
+    title = "K-means Airbnb Clusters in Cape Town",
+    legend.outside = TRUE
+  ) +
+  tm_legend(
+    symbol.size = 5
+  )
+```
+
+## Plots
+
+```{r}
+#PCA plot
+# PCA on modelling dataset
+nhc_pca <- prcomp(
+  airbnb_numeric_scaled,
+  center = FALSE,
+  scale. = FALSE
+)
+
+nhc_pca_plot_data <- as_tibble(nhc_pca$x[, 1:2]) |>
+  mutate(
+    NHC_Cluster = factor(km[[k_optimal]]$cluster)
+  )
+
+# Plot PCA Projection by Cluster:
+nhc_pca_plot_data |>
+  ggplot(aes(x = PC1, y = PC2, colour = NHC_Cluster)) +
+  geom_point(alpha = 0.65, size = 1.2) +
+  labs(
+    x = "Principal Component 1",
+    y = "Principal Component 2",
+    colour = "NHC Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom"
+  )
+
+#Classify clusters
+airbnb_profile_data <- airbnb_reduced |>
+  mutate(
+    cluster = factor(km[[k_optimal]]$cluster)
+  )
+
+#WCSS & silhouette table
+
+kmeans_validation <- data.frame(
+  K = 2:8,
+  Average_Silhouette_Width = round(silhouette_scores[1:7], 3),
+  Total_Within_Variation = round(wcss[2:8], 2))
+
+knitr::kable(
+  kmeans_validation,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Silhouette Width and Within-Cluster Variation for K-means Cluster Solutions",
+  align = "ccc"
+)
+
+
+#Cluster size
+kmeans_cluster_sizes <- data.frame(
+  Cluster = 1:k_optimal,
+  Listings = as.numeric(table(km[[k_optimal]]$cluster)))
+
+
+kmeans_cluster_sizes$Percentage <- round(
+  100 * kmeans_cluster_sizes$Listings /
+    sum(kmeans_cluster_sizes$Listings),
+  1)
+
+kable(
+  kmeans_cluster_sizes,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "K-means Clustering Cluster Sizes",
+  align = "ccc"
+)
+
+#Cluster profiling
+kmeans_profile <- airbnb_reduced |>
+  mutate(kmeans_cluster = factor(km[[k_optimal]]$cluster)) |>
+  group_by(kmeans_cluster) |>
+  summarise(
+    Listings = n(),
+    `Mean Price` = round(mean(price, na.rm = TRUE), 0),
+    `Median Price` = round(median(price, na.rm = TRUE), 0),
+    `Mean Accommodates` = round(mean(accommodates, na.rm = TRUE), 2),
+    `Mean Availability 365` = round(mean(availability_365, na.rm = TRUE), 1),
+    `Mean Number of Reviews` = round(mean(number_of_reviews, na.rm = TRUE), 1),
+    `Mean Review Rating` = round(mean(review_scores_rating, na.rm = TRUE), 2),
+    `Mean Host Listings Count` = round(mean(host_listings_count, na.rm = TRUE), 1),
+    .groups = "drop"
+  ) |>
+  pivot_longer(
+    cols = -kmeans_cluster,
+    names_to = "Metric",
+    values_to = "Value"
+  ) |>
+  pivot_wider(
+    names_from = kmeans_cluster,
+    values_from = Value,
+    names_prefix = "K-means Cluster "
+  )
+
+kable(
+  kmeans_profile,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Numeric Profile of K-means Clusters",
+  align = "lcccc"
+)
+```
+
+## Save Hierarchical Clustering Outputs
+
+```{r}
+# Save Objects:
+nhc_results <- list(
+  model_data = airbnb_numeric_scaled,
+  k_models = km,
+  within_cluster_var = wcss,
+  silhouette_width = sil_df,
+  best_k = k_optimal,
+  final_model = km[[k_optimal]],
+  clusters = km[[k_optimal]]$cluster,
+  cluster_sizes = kmeans_cluster_sizes,
+  numeric_profile = kmeans_profile,
+  pca = nhc_pca,
+  pca_plot_data = nhc_pca_plot_data
+)
+
+saveRDS(
+  nhc_results,
+  file = "nhc_results_airbnb.rds"
+)
+
+```

@@ -284,8 +284,7 @@ tm_shape(airbnb_sf_kmeans) +
 #PCA plot
 # PCA on modelling dataset
 nhc_sample_data <- airbnb_numeric_scaled[
-  hc_results$sample_index,
-]
+  hc_results$sample_index,]
 
 nhc_pca <- prcomp(
   nhc_sample_data,

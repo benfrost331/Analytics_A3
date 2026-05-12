@@ -6,6 +6,50 @@ editor: visual
 
 # Comparative Analysis
 
+## **Comparison of Cluster structures**
+
+```{r}
+
+hc_results <- readRDS("hc_results_airbnb.rds")
+nhc_results <- readRDS("nhc_results_airbnb.rds")
+
+# Extract NHC clusters for the HC sample only
+nhc_sample_clusters <- nhc_results$clusters[
+  hc_results$sample_index
+]
+
+# Create percentage comparison table
+comparison_table <- tibble(
+  HC_Cluster = factor(hc_results$clusters),
+  NHC_Cluster = factor(nhc_sample_clusters)
+) |>
+  dplyr::count(HC_Cluster, NHC_Cluster) |>
+  group_by(HC_Cluster) |>
+  mutate(
+    Percentage = round(100 * n / sum(n), 1)
+  ) |>
+  ungroup() |>
+  select(-n) |>
+  pivot_wider(
+    names_from = HC_Cluster,
+    values_from = Percentage,
+    names_prefix = "HC Cluster "
+  ) |>
+  arrange(NHC_Cluster)
+
+#latex
+comparison_table |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    digits = 1,
+    caption = "Percentage Composition of Hierarchical Clusters Across Non-Hierarchical Clusters",
+    align = "lccc"
+  )
+```
+
+## Comparison of cluster separation
+
 ```{r}
 
 ```

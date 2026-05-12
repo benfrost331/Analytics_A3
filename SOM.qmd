@@ -4,3 +4,524 @@ format: html
 editor: visual
 ---
 
+# Self-Organising Map Analysis
+
+This Quarto section assumes that the EDA/pre-processing code has already created the final model-ready dataset called `airbnb_model_data`, and that the reduced interpretable dataset is called `airbnb_reduced`.
+
+```{r som-libraries, message=FALSE, warning=FALSE}
+# Load Required Libraries:
+library(tidyverse)
+library(kohonen)
+library(cluster)
+library(scales)
+library(knitr)
+library(kableExtra)
+```
+
+```{r som-input-check}
+# Set Seed for Reproducibility:
+set.seed(2026)
+
+# Convert Final Model-Ready Data to Matrix Format for SOM:
+som_input <- airbnb_model_data |>
+  as.matrix()
+
+# Check Dataset Dimensions:
+som_input_overview <- tibble(
+  Dataset = "SOM input dataset",
+  Observations = nrow(som_input),
+  Variables = ncol(som_input)
+)
+
+# Output SOM Input Overview Table:
+som_input_overview_latex <- som_input_overview |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Dataset Used for Self-Organising Map Analysis",
+    align = c("l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_input_overview_latex)
+```
+
+```{r som-grid-evaluation}
+# Define Candidate SOM Grid Sizes:
+som_grid_options <- tibble(
+  Grid = c("8x8", "10x10", "12x12"),
+  XDim = c(8, 10, 12),
+  YDim = c(8, 10, 12)
+)
+
+# Function to Calculate Topographic Error:
+calculate_topographic_error <- function(som_model, data_matrix) {
+  codes <- som_model$codes[[1]]
+  first_bmu <- som_model$unit.classif
+  
+  data_norm <- rowSums(data_matrix^2)
+  code_norm <- rowSums(codes^2)
+  
+  dist_sq <- outer(data_norm, code_norm, "+") - 2 * data_matrix %*% t(codes)
+  dist_sq[cbind(seq_len(nrow(data_matrix)), first_bmu)] <- Inf
+  
+  second_bmu <- max.col(-dist_sq, ties.method = "first")
+  
+  unit_distances <- kohonen::unit.distances(som_model$grid)
+  
+  mean(unit_distances[cbind(first_bmu, second_bmu)] > 1.0001)
+}
+
+# Train Candidate SOMs:
+som_models <- som_grid_options |>
+  mutate(
+    Model = pmap(
+      list(XDim, YDim),
+      \(xdim, ydim) {
+        kohonen::som(
+          X = som_input,
+          grid = kohonen::somgrid(
+            xdim = xdim,
+            ydim = ydim,
+            topo = "hexagonal"
+          ),
+          rlen = 100,
+          alpha = c(0.05, 0.01),
+          keep.data = TRUE
+        )
+      }
+    )
+  )
+
+# Summarise Candidate Grid Performance:
+som_grid_evaluation <- som_models |>
+  mutate(
+    Map_Units = XDim * YDim,
+    Quantisation_Error = map_dbl(Model, ~ mean(.x$distances)),
+    Topographic_Error = map_dbl(Model, ~ calculate_topographic_error(.x, som_input))
+  ) |>
+  select(
+    Grid,
+    Map_Units,
+    Quantisation_Error,
+    Topographic_Error
+  ) |>
+  mutate(
+    Quantisation_Error = round(Quantisation_Error, 3),
+    Topographic_Error = round(Topographic_Error, 3)
+  )
+
+# Output Grid Evaluation Table:
+som_grid_evaluation_latex <- som_grid_evaluation |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "SOM Grid Size Evaluation",
+    align = c("l", "r", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_grid_evaluation_latex)
+```
+
+```{r som-final-model}
+# Select Final SOM Grid:
+# The 10x10 grid is used as a practical balance between map detail and interpretability.
+som_selected_grid <- "10x10"
+
+# Extract Final SOM Model:
+som_model <- som_models |>
+  filter(Grid == som_selected_grid) |>
+  pull(Model) |>
+  pluck(1)
+
+# Save SOM Codebook Vectors:
+som_codes <- som_model$codes[[1]]
+```
+
+```{r som-training-progress, fig.cap="SOM training progress."}
+# Plot SOM Training Progress Manually:
+
+som_training_progress <- as.numeric(som_model$changes)
+
+plot(
+  x = seq_along(som_training_progress),
+  y = som_training_progress,
+  type = "l",
+  main = "",
+  xlab = "Iteration",
+  ylab = "Mean Distance to Closest Unit"
+)
+```
+
+```{r som-counts-distance, fig.cap="SOM unit counts and neighbour distances."}
+# Plot SOM Counts and Neighbour Distances:
+par(mfrow = c(1, 2))
+plot(som_model, type = "counts", main = "SOM Unit Counts")
+plot(som_model, type = "dist.neighbours", main = "SOM Neighbour Distances")
+par(mfrow = c(1, 1))
+```
+
+```{r som-codebook-cluster-evaluation}
+# Evaluate Number of Clusters to Apply to SOM Codebook Vectors:
+som_candidate_k <- 2:8
+
+som_code_dist <- dist(som_codes, method = "euclidean")
+
+som_cluster_evaluation <- map_dfr(
+  som_candidate_k,
+  \(k) {
+    set.seed(123)
+    km <- kmeans(
+      som_codes,
+      centers = k,
+      nstart = 25
+    )
+    
+    sil <- silhouette(km$cluster, som_code_dist)
+    
+    tibble(
+      K = k,
+      Average_Silhouette_Width = mean(sil[, "sil_width"]),
+      Total_Within_Variation = km$tot.withinss
+    )
+  }
+) |>
+  mutate(
+    Average_Silhouette_Width = round(Average_Silhouette_Width, 3),
+    Total_Within_Variation = round(Total_Within_Variation, 2)
+  )
+
+# Output SOM Cluster Evaluation Table:
+som_cluster_evaluation_latex <- som_cluster_evaluation |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "SOM Codebook Cluster Number Evaluation",
+    align = c("r", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_cluster_evaluation_latex)
+```
+
+```{r som-cluster-evaluation-plots, fig.cap="SOM codebook cluster-number diagnostics."}
+# Plot SOM Codebook Cluster Number Diagnostics:
+som_silhouette_plot <- som_cluster_evaluation |>
+  ggplot(aes(x = K, y = Average_Silhouette_Width)) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = som_candidate_k) +
+  labs(
+    x = "Number of SOM Clusters (K)",
+    y = "Average Silhouette Width"
+  ) +
+  theme_minimal()
+
+som_wcv_plot <- som_cluster_evaluation |>
+  ggplot(aes(x = K, y = Total_Within_Variation)) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = som_candidate_k) +
+  labs(
+    x = "Number of SOM Clusters (K)",
+    y = "Total Within-Cluster Variation"
+  ) +
+  theme_minimal()
+
+som_silhouette_plot
+som_wcv_plot
+```
+
+```{r som-final-clusters}
+# Select Number of SOM Clusters:
+# k = 4 is used to align with the main non-hierarchical clustering segmentation and to allow comparison.
+som_k <- 4
+
+# Cluster SOM Codebook Vectors:
+set.seed(123)
+som_code_clusters <- kmeans(
+  som_codes,
+  centers = som_k,
+  nstart = 50
+)
+
+# Assign Each Listing to the Cluster of its Best-Matching SOM Unit:
+som_cluster <- factor(som_code_clusters$cluster[som_model$unit.classif])
+
+# Add SOM Clusters to the Original Reduced Dataset:
+airbnb_som_clustered <- airbnb_reduced |>
+  mutate(
+    SOM_Cluster = som_cluster
+  )
+
+# Create SOM Cluster Size Table:
+som_cluster_sizes <- airbnb_som_clustered |>
+  count(SOM_Cluster, name = "Listings") |>
+  mutate(
+    Percentage = percent(Listings / sum(Listings), accuracy = 0.1)
+  )
+
+# Output SOM Cluster Sizes Table:
+som_cluster_sizes_latex <- som_cluster_sizes |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "SOM Cluster Sizes",
+    align = c("l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_cluster_sizes_latex)
+```
+
+```{r som-cluster-map-clean, fig.cap="SOM map coloured by meta-cluster."}
+# Plot Clean SOM Meta-Cluster Map Without Observation Overplotting:
+
+# Convert SOM Codebook Cluster Assignments to a Plain Vector:
+som_cluster_vector <- as.integer(som_code_clusters$cluster)
+
+# Set Cluster Colours:
+som_cluster_colours <- c(
+  "1" = "#F8766D",
+  "2" = "#00BA38",
+  "3" = "#619CFF",
+  "4" = "#C77CFF"
+)
+
+# Identify Clusters Actually Present:
+present_som_clusters <- sort(unique(som_cluster_vector))
+
+# Allow Space for Legend:
+par(mar = c(4, 4, 1, 8), xpd = TRUE)
+
+# Plot Empty SOM Units Coloured by Meta-Cluster:
+plot(
+  som_model,
+  type = "mapping",
+  bgcol = som_cluster_colours[as.character(som_cluster_vector)],
+  pchs = NA,
+  main = ""
+)
+
+# Add Cluster Boundaries:
+kohonen::add.cluster.boundaries(
+  som_model,
+  som_cluster_vector
+)
+
+# Add Legend Outside the Plot Area:
+legend(
+  "right",
+  inset = c(-0.28, 0),
+  legend = paste("SOM Cluster", present_som_clusters),
+  fill = som_cluster_colours[as.character(present_som_clusters)],
+  border = "black",
+  bty = "n",
+  cex = 0.8,
+  title = "Meta-Cluster"
+)
+
+# Reset Plot Margins:
+par(mar = c(5, 4, 4, 2) + 0.1, xpd = FALSE)
+```
+
+```{r som-numeric-profile}
+# Profile SOM Clusters using Original Numeric Variables:
+som_numeric_profile <- airbnb_som_clustered |>
+  group_by(SOM_Cluster) |>
+  summarise(
+    Listings = n(),
+    Mean_Price = round(mean(price, na.rm = TRUE), 0),
+    Median_Price = round(median(price, na.rm = TRUE), 0),
+    Mean_Accommodates = round(mean(accommodates, na.rm = TRUE), 2),
+    Mean_Availability_365 = round(mean(availability_365, na.rm = TRUE), 1),
+    Mean_Number_of_Reviews = round(mean(number_of_reviews, na.rm = TRUE), 1),
+    Mean_Review_Rating = round(mean(review_scores_rating, na.rm = TRUE), 2),
+    Mean_Host_Listings_Count = round(mean(host_listings_count, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+# Pivot Profile for Report-Friendly Output:
+som_numeric_profile_pivot <- som_numeric_profile |>
+  pivot_longer(
+    cols = -SOM_Cluster,
+    names_to = "Metric",
+    values_to = "Value"
+  ) |>
+  mutate(
+    Metric = str_replace_all(Metric, "_", " ") |>
+      str_to_title()
+  ) |>
+  pivot_wider(
+    names_from = SOM_Cluster,
+    values_from = Value,
+    names_prefix = "SOM Cluster "
+  )
+
+# Output SOM Numeric Profile Table:
+som_numeric_profile_latex <- som_numeric_profile_pivot |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Numeric Profile of SOM Clusters",
+    align = "r",
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_numeric_profile_latex)
+```
+
+```{r som-categorical-profile}
+# Profile SOM Clusters using Dominant Categorical Values:
+som_categorical_profile <- airbnb_som_clustered |>
+  group_by(SOM_Cluster) |>
+  summarise(
+    Most_Common_Neighbourhood = names(sort(table(neighbourhood_cleansed), decreasing = TRUE))[1],
+    Most_Common_Property_Type = names(sort(table(property_type_proper_trim), decreasing = TRUE))[1],
+    .groups = "drop"
+  )
+
+# Output SOM Categorical Profile Table:
+som_categorical_profile_latex <- som_categorical_profile |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Dominant Categorical Characteristics of SOM Clusters",
+    align = c("l", "l", "l"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_categorical_profile_latex)
+```
+
+```{r som-pca-visualisation, fig.cap="PCA visualisation of the SOM clustering solution."}
+# Create PCA Visualisation of SOM Clusters:
+som_pca <- prcomp(
+  som_input,
+  center = FALSE,
+  scale. = FALSE
+)
+
+som_pca_plot_data <- as_tibble(som_pca$x[, 1:2]) |>
+  mutate(
+    SOM_Cluster = factor(som_cluster)
+  )
+
+som_pca_plot_data |>
+  ggplot(aes(x = PC1, y = PC2, colour = SOM_Cluster)) +
+  geom_point(alpha = 0.5, size = 0.8) +
+  labs(
+    x = "Principal Component 1",
+    y = "Principal Component 2",
+    colour = "SOM Cluster"
+  ) +
+  theme_minimal()
+```
+
+```{r som-spatial-plot, fig.cap="Spatial distribution of SOM clusters by latitude and longitude."}
+# Plot SOM Clusters by Latitude and Longitude:
+airbnb_som_clustered |>
+  ggplot(aes(x = longitude, y = latitude, colour = SOM_Cluster)) +
+  geom_point(alpha = 0.5, size = 0.8) +
+  coord_fixed() +
+  labs(
+    x = "Longitude",
+    y = "Latitude",
+    colour = "SOM Cluster",
+    title = "Spatial Distribution of SOM Clusters"
+  ) +
+  theme_minimal()
+```
+
+```{r som-comparison-with-previous}
+# Optional Comparison with Previous HC and NHC Results:
+# This chunk attempts to compare SOM clusters with prior cluster assignments if those objects exist.
+
+# Compare SOM with HC if the HC sample objects exist:
+if (exists("hc_sample_index") && exists("hc_cluster")) {
+  som_hc_comparison <- tibble(
+    HC_Cluster = factor(hc_cluster),
+    SOM_Cluster = som_cluster[hc_sample_index]
+  ) |>
+    count(HC_Cluster, SOM_Cluster) |>
+    group_by(HC_Cluster) |>
+    mutate(Percentage = percent(n / sum(n), accuracy = 0.1)) |>
+    ungroup()
+  
+  som_hc_comparison_latex <- som_hc_comparison |>
+    kable(
+      format = "latex",
+      booktabs = TRUE,
+      caption = "Comparison of HC and SOM Cluster Assignments",
+      align = c("l", "l", "r", "r"),
+      escape = TRUE
+    ) |>
+    kable_styling(
+      latex_options = c("hold_position", "scale_down")
+    )
+  
+  cat(som_hc_comparison_latex)
+}
+
+# Compare SOM with NHC/K-means if a full-sample NHC assignment exists:
+if (exists("nhc_cluster")) {
+  som_nhc_comparison <- tibble(
+    NHC_Cluster = factor(nhc_cluster),
+    SOM_Cluster = som_cluster
+  ) |>
+    count(NHC_Cluster, SOM_Cluster) |>
+    group_by(NHC_Cluster) |>
+    mutate(Percentage = percent(n / sum(n), accuracy = 0.1)) |>
+    ungroup()
+  
+  som_nhc_comparison_latex <- som_nhc_comparison |>
+    kable(
+      format = "latex",
+      booktabs = TRUE,
+      caption = "Comparison of NHC and SOM Cluster Assignments",
+      align = c("l", "l", "r", "r"),
+      escape = TRUE
+    ) |>
+    kable_styling(
+      latex_options = c("hold_position", "scale_down")
+    )
+  
+  cat(som_nhc_comparison_latex)
+}
+```
+
+```{r som-save-results}
+# Save SOM Results for Use in the Report and Comparative Analysis:
+som_results <- list(
+  input_data = som_input,
+  grid_evaluation = som_grid_evaluation,
+  model = som_model,
+  codebook_vectors = som_codes,
+  codebook_cluster_evaluation = som_cluster_evaluation,
+  codebook_clusters = som_code_clusters,
+  clusters = som_cluster,
+  clustered_data = airbnb_som_clustered,
+  cluster_sizes = som_cluster_sizes,
+  numeric_profile = som_numeric_profile,
+  categorical_profile = som_categorical_profile
+)
+```

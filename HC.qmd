@@ -282,8 +282,8 @@ hc_linkage_methods <- c(
   "ward.D2"
 )
 
-# Fit Hierarchical Clustering Models and Compute Cophenetic Correlations:
-hc_models <- map(
+# Fit Hierarchical Clustering Models:
+hc_models <- purrr::map(
   hc_linkage_methods,
   \(method_name) {
     hclust(
@@ -293,36 +293,25 @@ hc_models <- map(
   }
 )
 
+# Name the List of Models:
 names(hc_models) <- hc_linkage_methods
 
-# Calculate Cophenetic Correlation for Each Linkage Method:
-hc_linkage_comparison <- map_dfr(
-  names(hc_models),
-  \(method_name) {
-    hc_fit <- hc_models[[method_name]]
-    
-    tibble(
-      Linkage_Method = method_name,
-      Cophenetic_Correlation = round(
+# Compute Cophenetic Correlations:
+hc_linkage_comparison <- tibble(
+  Linkage_Method = str_to_title(hc_linkage_methods),
+  Cophenetic_Correlation = purrr::map_dbl(
+    hc_models,
+    \(hc_model) {
+      round(
         cor(
           hc_dist_euclidean,
-          cophenetic(hc_fit)
+          cophenetic(hc_model)
         ),
         3
       )
-    )
-  }
+    }
+  )
 ) |>
-  mutate(
-    Linkage_Method = recode(
-      Linkage_Method,
-      "single" = "Single",
-      "complete" = "Complete",
-      "average" = "Average",
-      "centroid" = "Centroid",
-      "ward.D2" = "Ward.D2"
-    )
-  ) |>
   arrange(desc(Cophenetic_Correlation))
 
 # Output Linkage Comparison Table:
@@ -330,7 +319,7 @@ hc_linkage_comparison_latex <- hc_linkage_comparison |>
   kable(
     format = "latex",
     booktabs = TRUE,
-    caption = "Cophenetic Correlation by Hierarchical Linkage Method",
+    caption = "Comparison of Hierarchical Clustering Linkage Methods",
     align = c("l", "r"),
     escape = TRUE
   ) |>

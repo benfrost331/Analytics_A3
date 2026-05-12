@@ -283,15 +283,31 @@ tm_shape(airbnb_sf_kmeans) +
 ```{r}
 #PCA plot
 # PCA on modelling dataset
+nhc_sample_data <- airbnb_numeric_scaled[
+  hc_results$sample_index,
+]
+
 nhc_pca <- prcomp(
-  airbnb_numeric_scaled,
+  nhc_sample_data,
   center = FALSE,
   scale. = FALSE
 )
 
-nhc_pca_plot_data <- as_tibble(nhc_pca$x[, 1:2]) |>
+nhc_sample_clusters <- km[[k_optimal]]$cluster[
+  hc_results$sample_index
+]
+
+nhc_pca_plot_data <- as_tibble(
+  nhc_pca$x[, 1:2]
+) |>
   mutate(
-    NHC_Cluster = factor(km[[k_optimal]]$cluster)
+    NHC_Cluster = factor(nhc_sample_clusters)
+  )
+
+nhc_pca_plot_data <- nhc_pca_plot_data |>
+  mutate(
+    PC1 = -PC1,
+    PC2 = -PC2
   )
 
 # Plot PCA Projection by Cluster:

@@ -52,4 +52,29 @@ comparison_table |>
 
 ```{r}
 
+# Single PCA on the shared sample
+pca_data    <- airbnb_numeric_scaled[hc_results$sample_index, ]
+pca_fit     <- prcomp(pca_data, center = FALSE, scale. = FALSE)
+
+# Both cluster assignments, aligned to the same rows
+pca_plot_df <- as_tibble(pca_fit$x[, 1:2]) |>
+  mutate(
+    HC_Cluster  = factor(hc_results$clusters),
+    NHC_Cluster = factor(km[[k_optimal]]$cluster[hc_results$sample_index]),
+    PC1 = -PC1,
+    PC2 = -PC2
+  )
+
+# Two plots, identical points, only the colour aesthetic changes
+p_hc <- ggplot(pca_plot_df, aes(PC1, PC2, colour = HC_Cluster)) +
+  geom_point(alpha = 0.65, size = 1.2) +
+  labs(x = "Principal Component 1", y = "Principal Component 2", colour = "HC Cluster") +
+  theme_minimal() + theme(legend.position = "bottom")
+
+p_nhc <- ggplot(pca_plot_df, aes(PC1, PC2, colour = NHC_Cluster)) +
+  geom_point(alpha = 0.65, size = 1.2) +
+  labs(x = "Principal Component 1", y = "Principal Component 2", colour = "NHC Cluster") +
+  theme_minimal() + theme(legend.position = "bottom")
+
+# patchwork::p_hc + p_nhc  # or however you're combining them
 ```

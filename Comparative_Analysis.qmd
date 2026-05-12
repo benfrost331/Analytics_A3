@@ -69,12 +69,34 @@ pca_plot_df <- as_tibble(pca_fit$x[, 1:2]) |>
 p_hc <- ggplot(pca_plot_df, aes(PC1, PC2, colour = HC_Cluster)) +
   geom_point(alpha = 0.65, size = 1.2) +
   labs(x = "Principal Component 1", y = "Principal Component 2", colour = "HC Cluster") +
-  theme_minimal() + theme(legend.position = "bottom")
+  theme_minimal() + 
+  theme(legend.position = "bottom")
 
 p_nhc <- ggplot(pca_plot_df, aes(PC1, PC2, colour = NHC_Cluster)) +
   geom_point(alpha = 0.65, size = 1.2) +
   labs(x = "Principal Component 1", y = "Principal Component 2", colour = "NHC Cluster") +
-  theme_minimal() + theme(legend.position = "bottom")
+  theme_minimal() + 
+  theme(legend.position = "bottom")
 
-# patchwork::p_hc + p_nhc  # or however you're combining them
+
+silhouette_comparison <- tibble(
+  Method = c("Hierarchical (HC)", "K-means (NHC)"),
+  k = c(hc_results$best_k, nhc_results$best_k),
+  `Average silhouette width` = c(
+    mean(hc_results$silhouette[, "sil_width"]),
+    nhc_results$silhouette_width$silhouette[
+      nhc_results$silhouette_width$k == nhc_results$best_k
+    ]
+  )
+)
+
+silhouette_comparison |>
+  kbl(
+    format    = "latex",
+    booktabs  = TRUE,
+    digits    = 3,
+    caption   = "Silhouette width for Hierarchical and Non-Hierarchical methods",
+    align     = "lccc"
+  )
+
 ```

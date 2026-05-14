@@ -24,7 +24,7 @@ comparison_table <- tibble(
   NHC_Cluster = factor(nhc_sample_clusters)
 ) |>
   dplyr::count(HC_Cluster, NHC_Cluster) |>
-  group_by(HC_Cluster) |>
+  group_by(NHC_Cluster) |>
   mutate(
     Percentage = round(100 * n / sum(n), 1)
   ) |>

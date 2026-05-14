@@ -525,3 +525,84 @@ som_results <- list(
   categorical_profile = som_categorical_profile
 )
 ```
+
+```{r}
+#Comparative analysis
+
+# Restrict SOM and NHC assignments to the HC sample
+som_sample <- som_cluster[hc_results$sample_index]
+nhc_sample <- nhc_results$clusters[hc_results$sample_index]
+hc_sample <- hc_results$clusters
+
+
+
+# Create percentage table for HC
+som_hc_table <- table(
+  "SOM Cluster" = som_sample,
+  "HC Cluster" = hc_sample
+)
+
+som_hc_percent <- round(
+  prop.table(som_hc_table, margin = 1) * 100,
+  1
+)
+
+# Convert to dataframe
+som_hc_df <- as.data.frame.matrix(som_hc_percent)
+
+# Create LaTeX table
+som_hc_latex <- kable(
+  som_hc_df,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Percentage Composition of SOM Clusters Across HC Clusters",
+  align = "lccc"
+)
+
+# Create percentage table for NHC
+som_nhc_table <- table(
+  "SOM Cluster" = som_sample,
+  "NHC Cluster" = nhc_sample
+)
+
+som_nhc_percent <- round(
+  prop.table(som_nhc_table, margin = 1) * 100,
+  1
+)
+
+# Convert to dataframe
+som_nhc_df <- as.data.frame.matrix(som_nhc_percent)
+
+# Create LaTeX table
+som_nhc_latex <- kable(
+  som_nhc_df,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Percentage Composition of SOM Clusters Across NHC Clusters",
+  align = "lccc"
+)
+
+
+#Silhouette comparison
+silhouette_comparison <- tibble(
+  Method = c("Hierarchical Clustering",
+             "Non-Hierarchical Clustering",
+             "Self-Organising Map"),
+  `Average silhouette width` = c(
+    mean(hc_results$silhouette[, "sil_width"]),
+    nhc_results$silhouette_width$silhouette[
+      nhc_results$silhouette_width$k == nhc_results$best_k
+    ],
+    silhouette_scores[som_k - min(som_candidate_k) + 1]
+  )
+)
+
+silhouette_comparison |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    digits = 3,
+    caption = "Comparison of Average Silhouette Widths Across Clustering Methods",
+    align = "lcc"
+  )
+```

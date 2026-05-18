@@ -946,8 +946,7 @@ hc_results <- list(
   clusters = hc_cluster,
   cluster_sizes = hc_cluster_sizes,
   numeric_profile = hc_numeric_profile,
-  categorical_profile = hc_categorical_profile,
-  silhouette = hc_final_silhouette
+  categorical_profile = hc_categorical_profile
 )
 
 saveRDS(

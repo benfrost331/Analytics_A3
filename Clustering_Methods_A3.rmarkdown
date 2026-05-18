@@ -1193,7 +1193,7 @@ nhc_results <- list(
   final_model = km[[k_optimal]],
   clusters = km[[k_optimal]]$cluster,
   cluster_sizes = kmeans_cluster_sizes,
-  numeric_profile = kmeans_profile,s
+  numeric_profile = kmeans_profile,
   pca_plot_data = nhc_pca_plot_data
 )
 

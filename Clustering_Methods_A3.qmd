@@ -1,0 +1,1789 @@
+---
+title: "ClusteringMethods"
+format: html
+editor: visual
+---
+
+```{r}
+# Loading Required Packages:
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(naniar)
+library(scales)
+library(patchwork)
+library(knitr)
+library(kableExtra)
+library(GGally)
+library(cluster)
+library(factoextra)
+library(sf)
+library(tmap)
+library(kohonen)
+
+# Set Seed for Reproducibility:
+set.seed(2026)
+```
+
+# EDA and Data Preprocessing
+
+## Data Loading and Raw Structure
+
+```{r}
+# Loading the data:
+load("airbnbListings.RData")
+
+# Storing the loaded data object:
+raw_data <- Airbnb_Excel_Lab_AAMB_Co
+
+# Chhecking the class and dimensions of the data:
+class(raw_data)
+dim(raw_data)
+```
+
+```{r}
+# Inspection of the raw variable types
+str(raw_data)
+```
+
+```{r}
+# Cleaning variable names:
+airbnb <- raw_data |>
+  clean_names()
+
+# Display cleaned variable names:
+names(airbnb)
+```
+
+```{r}
+# Creation of a basic overview table:
+basic_overview <- tibble(
+  Measure = c(
+    "Rows",
+    "Columns",
+    "Duplicate Rows",
+    "Duplicate IDs",
+    "Unique Hosts",
+    "Unique Neighbourhoods",
+    "Unique Property Types",
+    "Unique Room Types"
+  ),
+  Value = c(
+    nrow(airbnb),
+    ncol(airbnb),
+    sum(duplicated(airbnb)),
+    sum(duplicated(airbnb$id)),
+    n_distinct(airbnb$host_id),
+    n_distinct(airbnb$neighbourhood_cleansed),
+    n_distinct(airbnb$property_type_proper_trim),
+    n_distinct(airbnb$room_type_proper_trim)
+  )
+)
+
+# Outputting the table in LaTeX:
+basic_overview_latex <- basic_overview |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Basic Overview of the Airbnb Listings Dataset",
+    align = c("l", "r")
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(basic_overview_latex)
+```
+
+## Derived & Redundant Variable Removal:
+
+```{r}
+# Remove identifier, label and derived/redundant variables before missing data assessment:
+derived_vars <- c(
+  # Identifier and label variables not useful for clustering:
+  "id",
+  "host_id",
+  "host_name_trimmed_proper",
+  "picture_url",
+  
+  # Duplicated or less complete location variable:
+  "neighbourhood_proper_trim",
+  
+  # Derived/redundant host count variable:
+  "host_total_listings_count",
+  
+  # Room type is treated as a simplified/derived listing classification:
+  "room_type_proper_trim",
+  
+  # Bedroom count is treated as a derived/overlapping capacity measure:
+  "bedrooms",
+  
+  # Time-window booking variables derived from booking activity:
+  "booked_30",
+  "booked_60",
+  "booked_90",
+  "booked_365",
+  
+  # Revenue variables derived from price and booking activity:
+  "revenue_30",
+  "revenue_60",
+  "revenue_90",
+  "revenue_365",
+  
+  # Shorter availability windows derived from the same availability concept:
+  "availability_30",
+  "availability_60",
+  "availability_90",
+  
+  # Review count variants derived from the overall review activity concept:
+  "number_of_reviews_ltm",
+  "number_of_reviews_l30d",
+  "reviews_per_month"
+)
+
+# Create the reduced working dataset:
+airbnb_reduced <- airbnb |>
+  select(-any_of(derived_vars))
+
+```
+
+## Highly Correlated Variable Removal:
+
+```{r}
+# Identify highly correlated numeric variables:
+numeric_data <- airbnb_reduced |>
+  select(where(is.numeric))
+
+# Calculate absolute correlation matrix:
+cor_matrix <- numeric_data |>
+  cor(use = "pairwise.complete.obs") |>
+  abs()
+
+# Convert correlation matrix to long format:
+high_corr_pairs <- as.data.frame(as.table(cor_matrix)) |>
+  rename(
+    Variable_1 = Var1,
+    Variable_2 = Var2,
+    Correlation = Freq
+  ) |>
+  filter(
+    Variable_1 != Variable_2,
+    Correlation >= 0.90
+  ) |>
+  mutate(
+    Pair_ID = pmap_chr(
+      list(as.character(Variable_1), as.character(Variable_2)),
+      ~paste(sort(c(..1, ..2)), collapse = "_")
+    )
+  ) |>
+  distinct(Pair_ID, .keep_all = TRUE) |>
+  select(-Pair_ID) |>
+  arrange(desc(Correlation))
+
+# Specify variables to remove based on high correlation and interpretability:
+high_corr_vars <- c(
+  "beds",
+  "bathrooms",
+  "review_scores_accuracy",
+  "review_scores_cleanliness",
+  "review_scores_checkin",
+  "review_scores_communication",
+  "review_scores_location",
+  "review_scores_value"
+)
+
+# Create the Further Reduced Working Dataset:
+airbnb_reduced <- airbnb_reduced |>
+  select(-any_of(high_corr_vars))
+
+
+```
+
+## Remaining Variables
+
+```{r}
+# Create table of remaining variables after redundancy-based removal:
+remaining_vars_table <- tibble(
+  Variable = names(airbnb_reduced),
+  Type = sapply(airbnb_reduced, \(x) class(x)[1])
+) |>
+  mutate(
+    Variable_Number = row_number()
+  ) |>
+  select(Variable_Number, Variable, Type)
+
+# Output remaining variables table in LaTeX:
+remaining_vars_latex <- remaining_vars_table |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Variables Retained After Redundancy-Based Removal",
+    align = c("r", "l", "l"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  ) |>
+  column_spec(1, width = "2.5cm") |>
+  column_spec(2, width = "6cm") |>
+  column_spec(3, width = "3cm")
+
+cat(remaining_vars_latex)
+```
+
+## Missing Data Assessment
+
+```{r}
+# Check/calculate if missing variables in the reduced dataset:
+missing_summary <- airbnb_reduced |>
+  summarise(across(everything(), ~sum(is.na(.x)))) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "N_Observations_Missing"
+  ) |>
+  mutate(
+    Pct_Observations_Missing = N_Observations_Missing / nrow(airbnb_reduced),
+    Pct_Observations_Missing = percent(Pct_Observations_Missing, accuracy = 0.001)
+  ) |>
+  arrange(desc(N_Observations_Missing))
+
+missing_summary
+```
+
+## Key Numeric Variable Distributions
+
+```{r}
+# Plot distributions of retained numeric variables:
+key_numeric <- c(
+  "host_listings_count",
+  "accommodates",
+  "price",
+  "availability_365",
+  "number_of_reviews",
+  "review_scores_rating"
+)
+
+# Set plot text sizes:
+plot_title_size <- 16
+axis_title_size <- 13
+axis_text_size <- 10
+strip_text_size <- 11
+
+# Keep only numeric variables that exist in the reduced dataset:
+existing_key_numeric <- intersect(key_numeric, names(airbnb_reduced))
+
+# Produce histograms of the retained numeric variables:
+airbnb_reduced |>
+  select(all_of(existing_key_numeric)) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) |>
+  ggplot(aes(x = value, fill = variable)) +
+  geom_histogram(bins = 30, colour = "white", show.legend = FALSE) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(
+    x = NULL,
+    y = "Listings"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = plot_title_size, face = "bold"),
+    axis.title = element_text(size = axis_title_size),
+    axis.text = element_text(size = axis_text_size),
+    strip.text = element_text(size = strip_text_size, face = "bold")
+  )
+```
+
+## Transformation & Standardsation of Numeric Variables:
+
+```{r}
+# Specify numeric variables to be used for modelling:
+numeric_model_vars <- c(
+  "host_listings_count",
+  "accommodates",
+  "price",
+  "availability_365",
+  "number_of_reviews",
+  "review_scores_rating"
+)
+
+# Specify strongly right-skewed variables for log transformation:
+log_transform_vars <- c(
+  "host_listings_count",
+  "price",
+  "number_of_reviews"
+)
+
+# Create transformed and standardised numeric modelling dataset:
+airbnb_numeric_scaled <- airbnb_reduced |>
+  select(all_of(numeric_model_vars)) |>
+  mutate(
+    across(
+      all_of(log_transform_vars),
+      ~ log1p(.x),
+      .names = "log_{.col}"
+    )
+  ) |>
+  select(
+    -all_of(log_transform_vars)
+  ) |>
+  mutate(
+    across(
+      everything(),
+      ~ as.numeric(scale(.x)),
+      .names = "scaled_{.col}"
+    )
+  ) |>
+  select(
+    starts_with("scaled_")
+  )
+
+# Rename variables for cleaner modelling output:
+names(airbnb_numeric_scaled) <- names(airbnb_numeric_scaled) |>
+  str_remove("^scaled_") |>
+  str_remove("^log_")
+```
+
+## Transformed & Standardised Key Numeric Variable Distributions
+
+```{r}
+# Plot distributions of transformed and standardised numeric variables:
+
+# Set plot text sizes:
+plot_title_size <- 16
+axis_title_size <- 13
+axis_text_size <- 10
+strip_text_size <- 11
+
+# Rename variables for plot headings:
+airbnb_numeric_scaled_plot <- airbnb_numeric_scaled |>
+  rename(
+    `log(host_listings_count)` = host_listings_count,
+    accommodates = accommodates,
+    `log(price)` = price,
+    availability_365 = availability_365,
+    `log(number_of_reviews)` = number_of_reviews,
+    review_scores_rating = review_scores_rating
+  )
+
+# Produce histograms of the transformed and standardised numeric variables:
+airbnb_numeric_scaled_plot |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) |>
+  ggplot(aes(x = value, fill = variable)) +
+  geom_histogram(bins = 30, colour = "white", show.legend = FALSE) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(
+    x = "Standardised Value",
+    y = "Listings"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = plot_title_size, face = "bold"),
+    axis.title = element_text(size = axis_title_size),
+    axis.text = element_text(size = axis_text_size),
+    strip.text = element_text(size = strip_text_size, face = "bold")
+  )
+```
+
+## Categorical Variable Summaries
+
+```{r}
+# Create frequency tables for retained categorical variables:
+cat_vars <- c(
+  "neighbourhood_cleansed",
+  "property_type_proper_trim"
+)
+
+# Keep only categorical variables that exist in the reduced dataset:
+existing_cat_vars <- intersect(cat_vars, names(airbnb_reduced))
+
+# Create top category frequency tables:
+cat_frequency_tables <- airbnb_reduced |>
+  select(all_of(existing_cat_vars)) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "Category"
+  ) |>
+  count(Variable, Category, sort = TRUE) |>
+  group_by(Variable) |>
+  mutate(
+    Pct = percent(n / sum(n), accuracy = 0.1)
+  ) |>
+  slice_max(n, n = 10, with_ties = FALSE) |>
+  ungroup() |>
+  rename(
+    Frequency = n,
+    Percentage = Pct
+  )
+
+# Output categorical frequency tables in LaTeX:
+cat_frequency_latex <- cat_frequency_tables |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Top Categories for Retained Categorical Variables",
+    align = c("l", "l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  ) |>
+  column_spec(1, width = "4cm") |>
+  column_spec(2, width = "6cm") |>
+  column_spec(3, width = "3cm") |>
+  column_spec(4, width = "3cm")
+
+cat(cat_frequency_latex)
+```
+
+```{r}
+# Consolidate retained categorical variables before dummy encoding:
+
+# Specify retained categorical variables:
+categorical_model_vars <- c(
+  "neighbourhood_cleansed",
+  "property_type_proper_trim"
+)
+
+# Specify the number of major categories to retain:
+n_major_neighbourhoods <- 10
+n_major_property_types <- 10
+
+# Identify major neighbourhood categories:
+major_neighbourhoods <- airbnb_reduced |>
+  count(neighbourhood_cleansed, sort = TRUE) |>
+  slice_head(n = n_major_neighbourhoods) |>
+  pull(neighbourhood_cleansed)
+
+# Identify major property type categories:
+major_property_types <- airbnb_reduced |>
+  count(property_type_proper_trim, sort = TRUE) |>
+  slice_head(n = n_major_property_types) |>
+  pull(property_type_proper_trim)
+
+# Create consolidated categorical variables:
+airbnb_categorical_consolidated <- airbnb_reduced |>
+  mutate(
+    neighbourhood_grouped = if_else(
+      neighbourhood_cleansed %in% major_neighbourhoods,
+      neighbourhood_cleansed,
+      "Other"
+    ),
+    property_type_grouped = if_else(
+      property_type_proper_trim %in% major_property_types,
+      property_type_proper_trim,
+      "Other"
+    )
+  ) |>
+  select(
+    neighbourhood_grouped,
+    property_type_grouped
+  )
+
+# Create audit table showing consolidated category frequencies:
+consolidated_cat_summary <- airbnb_categorical_consolidated |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "Category"
+  ) |>
+  count(Variable, Category, sort = TRUE) |>
+  group_by(Variable) |>
+  mutate(
+    Percentage = percent(n / sum(n), accuracy = 0.1)
+  ) |>
+  ungroup() |>
+  rename(
+    Frequency = n
+  )
+
+# Output consolidated category summary LaTeX:
+consolidated_cat_summary_latex <- consolidated_cat_summary |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Consolidated Categorical Variables Prior to Dummy Encoding",
+    align = c("l", "l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  ) |>
+  column_spec(1, width = "4cm") |>
+  column_spec(2, width = "6cm") |>
+  column_spec(3, width = "3cm") |>
+  column_spec(4, width = "3cm")
+
+cat(consolidated_cat_summary_latex)
+
+# Dummy encode the consolidated categorical variables:
+airbnb_categorical_dummies <- model.matrix(
+  ~ neighbourhood_grouped + property_type_grouped - 1,
+  data = airbnb_categorical_consolidated
+) |>
+  as.data.frame()
+
+# Clean dummy variable names:
+names(airbnb_categorical_dummies) <- names(airbnb_categorical_dummies) |>
+  str_replace_all("neighbourhood_grouped", "neighbourhood_") |>
+  str_replace_all("property_type_grouped", "property_type_") |>
+  str_replace_all("[^A-Za-z0-9_]", "_") |>
+  str_replace_all("_+", "_") |>
+  str_remove("_$") |>
+  str_to_lower()
+
+# Combine standardised numeric variables and dummy-encoded categorical variables:
+airbnb_model_data <- bind_cols(
+  airbnb_numeric_scaled,
+  airbnb_categorical_dummies
+)
+
+# Check final modelling dataset dimensions:
+model_data_overview <- tibble(
+  Dataset = "Final modelling dataset",
+  Rows = nrow(airbnb_model_data),
+  Columns = ncol(airbnb_model_data)
+)
+
+# Output final modelling dataset overview in LaTeX:
+model_data_overview_latex <- model_data_overview |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Final Modelling Dataset After Categorical Consolidation and Dummy Encoding",
+    align = c("l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(model_data_overview_latex)
+
+```
+
+## Summary of Required Pre-processing
+
+The modelling stage should use the cleaned dataset rather than the raw extract. Identifier and descriptive variables such as listing IDs, picture URLs, host names and raw text labels should be excluded because they do not provide meaningful distance-based structure. Monetary and count variables should be log-transformed where they are strongly right-skewed. Invalid values such as non-positive prices, impossible availability or booking values, and implausible coordinates should either be removed or corrected only if a reliable correction rule exists. Missing values should be handled before clustering because distance-based methods cannot use incomplete rows. Categorical variables such as room type, property type and neighbourhood should be converted to factors, rare categories should be grouped, and dummy variables should be created. Finally, all numeric and dummy variables used for hierarchical clustering, non-hierarchical clustering and SOMs should be standardised so that variables measured on larger scales do not dominate the clustering solution.
+
+# Hierarchical clustering
+
+```{r}
+# Retain raw variables for cluster profiling later:
+airbnb_profile_data <- airbnb_reduced
+
+# Set Seed for Reproducibility:
+set.seed(2026)
+```
+
+## Hierarchical Clustering Sample
+
+```{r}
+# Specify reproducible sample size for HC:
+hc_sample_size <- min(2500, nrow(airbnb_model_data))
+
+# Draw a reproducible sample:
+hc_sample_index <- sample(
+  seq_len(nrow(airbnb_model_data)),
+  size = hc_sample_size
+)
+
+# Create HC modelling and profiling datasets:
+hc_data <- airbnb_model_data |>
+  slice(hc_sample_index)
+
+hc_profile_data <- airbnb_profile_data |>
+  slice(hc_sample_index)
+
+# Create sample overview table:
+hc_sample_overview <- tibble(
+  Dataset = "Hierarchical clustering sample",
+  Observations = nrow(hc_data),
+  Variables = ncol(hc_data)
+)
+
+# Output sample overview table in LaTeX:
+hc_sample_overview_latex <- hc_sample_overview |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Dataset Used for Hierarchical Clustering",
+    align = c("l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(hc_sample_overview_latex)
+```
+
+## Dissimilarity Matrix
+
+```{r}
+# Compute euclidean distance matrix:
+hc_dist_euclidean <- dist(
+  hc_data,
+  method = "euclidean"
+)
+```
+
+## Linkage Method Comparison
+
+```{r}
+# Define linkage methods to compare:
+hc_linkage_methods <- c(
+  "single",
+  "complete",
+  "average",
+  "centroid",
+  "ward.D2"
+)
+
+# Fit hierarchical clustering models:
+hc_models <- purrr::map(
+  hc_linkage_methods,
+  \(method_name) {
+    hclust(
+      hc_dist_euclidean,
+      method = method_name
+    )
+  }
+)
+
+# Name the list of models:
+names(hc_models) <- hc_linkage_methods
+
+```
+
+```{r}
+# Plot dendrograms for main linkage methods:
+par(mfrow = c(2, 2))
+
+plot(
+  hc_models[["single"]],
+  labels = FALSE,
+  main = "Single Linkage",
+  xlab = "Listings",
+  ylab = "Height"
+)
+
+plot(
+  hc_models[["complete"]],
+  labels = FALSE,
+  main = "Complete Linkage",
+  xlab = "Listings",
+  ylab = "Height"
+)
+
+plot(
+  hc_models[["average"]],
+  labels = FALSE,
+  main = "Average Linkage",
+  xlab = "Listings",
+  ylab = "Height"
+)
+
+plot(
+  hc_models[["ward.D2"]],
+  labels = FALSE,
+  main = "Ward.D2 Linkage",
+  xlab = "Listings",
+  ylab = "Height"
+)
+
+```
+
+```{r}
+# Select Final Linkage Method:
+hc_final_method <- "ward.D2"
+
+# Extract Final Hierarchical Clustering Model:
+hc_final <- hc_models[[hc_final_method]]
+```
+
+## Choosing the Number of Clusters
+
+```{r}
+# k grid:
+k_values <- 2:8
+
+# Function for calculating total within-cluster variation:
+within_variation_manual <- function(X, cluster) {
+  clusters <- sort(unique(cluster))
+  total_within <- 0
+  
+  for (k in clusters) {
+    Xk <- X[cluster == k, , drop = FALSE]
+    centroid <- colMeans(Xk)
+    squared_distances <- rowSums((sweep(Xk, 2, centroid, "-"))^2)
+    total_within <- total_within + sum(squared_distances)
+  }
+  
+  total_within
+}
+
+# Evaluate candidate K values:
+hc_k_evaluation <- map_dfr(
+  k_values,
+  \(k) {
+    cluster_k <- cutree(hc_final, k = k)
+    sil_k <- silhouette(cluster_k, hc_dist_euclidean)
+    
+    tibble(
+      K = k,
+      Total_Within_Variation = round(
+        within_variation_manual(as.matrix(hc_data), cluster_k),
+        2
+      ),
+      Average_Silhouette_Width = round(
+        mean(sil_k[, "sil_width"]),
+        3
+      )
+    )
+  }
+)
+
+# Select K:
+hc_best_k = 3
+
+```
+
+```{r}
+# Set plot text sizes:
+plot_title_size <- 14
+axis_title_size <- 12
+axis_text_size <- 10
+
+# Plot within-cluster variation:
+hc_wv_plot <- hc_k_evaluation |>
+  ggplot(aes(x = K, y = Total_Within_Variation)) +
+  geom_line() +
+  geom_point(size = 2) +
+  geom_vline(xintercept = hc_best_k, linetype = "dashed") +
+  scale_x_continuous(breaks = k_values) +
+  labs(
+    x = "Number of Clusters (K)",
+    y = "Total Within-Cluster Variation"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = plot_title_size, face = "bold"),
+    axis.title = element_text(size = axis_title_size),
+    axis.text = element_text(size = axis_text_size)
+  )
+
+# Plot average silhouette width:
+hc_sil_plot <- hc_k_evaluation |>
+  ggplot(aes(x = K, y = Average_Silhouette_Width)) +
+  geom_line() +
+  geom_point(size = 2) +
+  geom_vline(xintercept = hc_best_k, linetype = "dashed") +
+  scale_x_continuous(breaks = k_values) +
+  labs(
+    x = "Number of Clusters (K)",
+    y = "Average Silhouette Width"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = plot_title_size, face = "bold"),
+    axis.title = element_text(size = axis_title_size),
+    axis.text = element_text(size = axis_text_size)
+  )
+
+hc_sil_plot
+hc_wv_plot
+```
+
+## Final Hierarchical Clustering Solution
+
+```{r}
+# Cut the final dendrogram:
+hc_cluster <- cutree(
+  hc_final,
+  k = hc_best_k
+)
+
+# Add cluster assignments to modelling and profiling data:
+hc_clustered_data <- hc_data |>
+  mutate(
+    HC_Cluster = factor(hc_cluster)
+  )
+
+hc_profile_clustered <- hc_profile_data |>
+  mutate(
+    HC_Cluster = factor(hc_cluster)
+  )
+
+# Cluster size table:
+hc_cluster_sizes <- hc_profile_clustered |>
+  count(HC_Cluster, name = "N_Listings") |>
+  mutate(
+    Percentage = percent(N_Listings / sum(N_Listings), accuracy = 0.1)
+  )
+
+# Output cluster size table:
+hc_cluster_sizes_latex <- hc_cluster_sizes |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Hierarchical Clustering Cluster Sizes",
+    align = c("l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(hc_cluster_sizes_latex)
+```
+
+```{r}
+# Plot final dendrogram with cluster cuts:
+plot(
+  hc_final,
+  labels = FALSE,
+  hang = -1,
+  main = NULL,
+  xlab = "Airbnb Listings",
+  ylab = "Height"
+)
+
+rect.hclust(
+  hc_final,
+  k = hc_best_k,
+  border = seq_len(hc_best_k) + 1
+)
+```
+
+## Cluster Profiling
+
+```{r}
+# Numeric cluster profile in original units:
+hc_numeric_profile <- hc_profile_clustered |>
+  group_by(HC_Cluster) |>
+  summarise(
+    Listings = n(),
+    Mean_Price = round(mean(price, na.rm = TRUE), 0),
+    Median_Price = round(median(price, na.rm = TRUE), 0),
+    Mean_Accommodates = round(mean(accommodates, na.rm = TRUE), 2),
+    Mean_Availability_365 = round(mean(availability_365, na.rm = TRUE), 1),
+    Mean_Number_of_Reviews = round(mean(number_of_reviews, na.rm = TRUE), 1),
+    Mean_Review_Rating = round(mean(review_scores_rating, na.rm = TRUE), 2),
+    Mean_Host_Listings_Count = round(mean(host_listings_count, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+# Output numeric cluster profile:
+hc_numeric_profile_latex <- hc_numeric_profile |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Numeric Profile of Hierarchical Clusters in Original Units",
+    align = "r",
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(hc_numeric_profile_latex)
+```
+
+```{r}
+# Helper function for most common category:
+most_common <- function(x) {
+  names(sort(table(x), decreasing = TRUE))[1]
+}
+
+# Categorical cluster profile:
+hc_categorical_profile <- hc_profile_clustered |>
+  group_by(HC_Cluster) |>
+  summarise(
+    Most_Common_Neighbourhood = most_common(neighbourhood_cleansed),
+    Most_Common_Property_Type = most_common(property_type_proper_trim),
+    .groups = "drop"
+  )
+
+# Output categorical cluster profile:
+hc_categorical_profile_latex <- hc_categorical_profile |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Dominant Categorical Characteristics of Hierarchical Clusters",
+    align = c("l", "l", "l"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(hc_categorical_profile_latex)
+```
+
+## Save Hierarchical Clustering Outputs
+
+```{r}
+# Save Objects for Later Non-Hierarchical and SOM Comparison:
+hc_results <- list(
+  sample_index = hc_sample_index,
+  model_data = hc_data,
+  profile_data = hc_profile_clustered,
+  distance_matrix = hc_dist_euclidean,
+  linkage_models = hc_models,
+  final_method = hc_final_method,
+  final_model = hc_final,
+  k_evaluation = hc_k_evaluation,
+  best_k = hc_best_k,
+  clusters = hc_cluster,
+  cluster_sizes = hc_cluster_sizes,
+  numeric_profile = hc_numeric_profile,
+  categorical_profile = hc_categorical_profile,
+  silhouette = hc_final_silhouette
+)
+
+saveRDS(
+  hc_results,
+  file = "hc_results_airbnb.rds"
+)
+```
+
+# Non-hierarchical clustering
+
+## K-means
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Create vector to store models
+km <- vector('list', 8)
+# Number of initiations, tuned manually
+nstart <- 25
+
+# Fit kmeans models over the k values
+for (i in 1:8) {
+  km[[i]] <- kmeans(airbnb_numeric_scaled, i, nstart=nstart, iter.max = 100)   
+}
+
+# Extract within cluster variation for each k
+wcss <- sapply(km, function(x) x$tot.withinss)
+
+# Extract the silhouette scores for each k
+silhouette_scores <- sapply(
+  2:8,
+  function(k) {
+    sil <- silhouette(
+      km[[k]]$cluster,
+      dist(airbnb_numeric_scaled)
+    )
+    mean(sil[, 3])
+  }
+)
+
+# Create dataframes for plotting
+elbow_df <- data.frame(
+  k = 1:8,
+  WCSS = wcss
+)
+
+sil_df <- data.frame(
+  k = 2:8,
+  silhouette = silhouette_scores)
+
+k_optimal <- 4
+
+# Elbow plot
+elbow_plot <- ggplot(elbow_df, aes(x = k, y = WCSS)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  scale_x_continuous(breaks = 1:8) +
+  labs(
+    title = "Elbow Method for K-means Clustering",
+    x = "Number of Clusters (k)",
+    y = "Within-Cluster Sum of Squares (WCSS)") + theme_minimal() + 
+    geom_vline(
+  xintercept = k_optimal,
+  linetype = "dashed",
+  linewidth = 0.8
+)
+
+# Silhouette plots
+silhouette_plot <- ggplot(sil_df, aes(x = k, y = silhouette)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  geom_vline(
+  xintercept = k_optimal,
+  linetype = "dashed",
+  linewidth = 0.8
+) +
+  scale_x_continuous(breaks = 2:8) +
+  
+  labs(
+    title = "Average Silhouette Width",
+    x = "Number of Clusters (k)",
+    y = "Average Silhouette Width"
+  ) +
+  theme_minimal()
+
+elbow_plot + silhouette_plot
+
+# Add the cluster assignments to the data
+airbnb_clustered_kmeans <- airbnb_reduced |>
+  mutate(kmeans_cluster = factor(km[[k_optimal]]$cluster))
+
+
+```
+
+## Plots
+
+```{r}
+#Classify clusters
+airbnb_profile_data <- airbnb_reduced |>
+  mutate(
+    cluster = factor(km[[k_optimal]]$cluster)
+  )
+
+#Cluster size
+kmeans_cluster_sizes <- data.frame(
+  Cluster = 1:k_optimal,
+  Listings = as.numeric(table(km[[k_optimal]]$cluster)))
+
+# Calculate percentages
+kmeans_cluster_sizes$Percentage <- round(
+  100 * kmeans_cluster_sizes$Listings /
+    sum(kmeans_cluster_sizes$Listings),
+  1)
+
+# Compile LaTeX code for table
+kable(
+  kmeans_cluster_sizes,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "K-means Clustering Cluster Sizes",
+  align = "ccc"
+)
+
+# Numeric cluster profiling
+kmeans_profile <- airbnb_reduced |>
+  mutate(kmeans_cluster = factor(km[[k_optimal]]$cluster)) |>
+  group_by(kmeans_cluster) |>
+  summarise(
+    Listings = n(),
+    `Mean Price` = round(mean(price, na.rm = TRUE), 0),
+    `Median Price` = round(median(price, na.rm = TRUE), 0),
+    `Mean Accommodates` = round(mean(accommodates, na.rm = TRUE), 2),
+    `Mean Availability 365` = round(mean(availability_365, na.rm = TRUE), 1),
+    `Mean Number of Reviews` = round(mean(number_of_reviews, na.rm = TRUE), 1),
+    `Mean Review Rating` = round(mean(review_scores_rating, na.rm = TRUE), 2),
+    `Mean Host Listings Count` = round(mean(host_listings_count, na.rm = TRUE), 1),
+    .groups = "drop"
+  ) |>
+  pivot_longer(
+    cols = -kmeans_cluster,
+    names_to = "Metric",
+    values_to = "Value"
+  ) |>
+  pivot_wider(
+    names_from = kmeans_cluster,
+    values_from = Value,
+    names_prefix = "K-means Cluster "
+  )
+
+# Compile LaTeX code for table
+kable(
+  kmeans_profile,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Numeric Profile of K-means Clusters",
+  align = "lcccc"
+)
+
+# Create dataset containing K-means cluster assignments
+nhc_profile_clustered <- airbnb_reduced |>
+  mutate(
+    NHC_Cluster = factor(km[[k_optimal]]$cluster)
+  )
+
+# Helper function for most common category:
+most_common <- function(x) {
+  names(sort(table(x), decreasing = TRUE))[1]
+}
+
+# Categorical cluster profile:
+nhc_categorical_profile <- nhc_profile_clustered |>
+  group_by(NHC_Cluster) |>
+  summarise(
+    Most_Common_Neighbourhood = most_common(neighbourhood_cleansed),
+    Most_Common_Property_Type = most_common(property_type_proper_trim),
+    .groups = "drop"
+  )
+
+# Convert categorical cluster profile table to LaTeX format
+nhc_categorical_profile_latex <- nhc_categorical_profile |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Dominant Categorical Characteristics of Non-Hierarchical Clusters",
+    align = c("l", "l", "l"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+```
+
+## Save Hierarchical Clustering Outputs
+
+```{r}
+# Save Objects:
+nhc_results <- list(
+  model_data = airbnb_numeric_scaled,
+  k_models = km,
+  within_cluster_var = wcss,
+  silhouette_width = sil_df,
+  best_k = k_optimal,
+  final_model = km[[k_optimal]],
+  clusters = km[[k_optimal]]$cluster,
+  cluster_sizes = kmeans_cluster_sizes,
+  numeric_profile = kmeans_profile,
+  pca = nhc_pca,
+  pca_plot_data = nhc_pca_plot_data
+)
+
+saveRDS(
+  nhc_results,
+  file = "nhc_results_airbnb.rds"
+)
+```
+
+# Comparative analysis
+
+## **Comparison of Cluster structures**
+
+```{r}
+# Extract NHC clusters for the HC sample only
+nhc_sample_clusters <- nhc_results$clusters[
+  hc_results$sample_index
+]
+
+# Create percentage comparison table
+comparison_table <- tibble(
+  HC_Cluster = factor(hc_results$clusters),
+  NHC_Cluster = factor(nhc_sample_clusters)
+) |>
+  dplyr::count(HC_Cluster, NHC_Cluster) |>
+  group_by(NHC_Cluster) |>
+  mutate(
+    Percentage = round(100 * n / sum(n), 1)
+  ) |>
+  ungroup() |>
+  select(-n) |>
+  pivot_wider(
+    names_from = HC_Cluster,
+    values_from = Percentage,
+    names_prefix = "HC Cluster "
+  ) |>
+  arrange(NHC_Cluster)
+
+#Compile table in LaTeX
+comparison_table |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    digits = 1,
+    caption = "Percentage Composition of Hierarchical Clusters Across Non-Hierarchical Clusters",
+    align = "lccc"
+  )
+```
+
+## Comparison of cluster separation
+
+```{r}
+
+# Single PCA on the shared sample
+pca_data    <- airbnb_numeric_scaled[hc_results$sample_index, ]
+pca_fit     <- prcomp(pca_data, center = FALSE, scale. = FALSE)
+
+# Both cluster assignments
+pca_plot_df <- as_tibble(pca_fit$x[, 1:2]) |>
+  mutate(
+    HC_Cluster  = factor(hc_results$clusters),
+    NHC_Cluster = factor(km[[k_optimal]]$cluster[hc_results$sample_index]),
+    PC1 = -PC1,
+    PC2 = -PC2
+  )
+
+# PCA plots on same sample
+p_hc <- ggplot(pca_plot_df, aes(PC1, PC2, colour = HC_Cluster)) +
+  geom_point(alpha = 0.65, size = 1.2) +
+  labs(x = "Principal Component 1", y = "Principal Component 2", colour = "HC Cluster") +
+  theme_minimal() + 
+  theme(legend.position = "bottom")
+
+p_nhc <- ggplot(pca_plot_df, aes(PC1, PC2, colour = NHC_Cluster)) +
+  geom_point(alpha = 0.65, size = 1.2) +
+  labs(x = "Principal Component 1", y = "Principal Component 2", colour = "NHC Cluster") +
+  theme_minimal() + 
+  theme(legend.position = "bottom")
+
+p_hc + p_nhc
+
+# Silhouette comparison between HC and NHC models
+silhouette_comparison <- tibble(
+  Method = c("Hierarchical (HC)", "K-means (NHC)"),
+  k = c(hc_results$best_k, nhc_results$best_k),
+  `Average silhouette width` = c(
+    mean(hc_results$silhouette[, "sil_width"]),
+    nhc_results$silhouette_width$silhouette[
+      nhc_results$silhouette_width$k == nhc_results$best_k
+    ]
+  )
+)
+
+# Compile the silhouette comparison in LaTeX:
+silhouette_comparison |>
+  kbl(
+    format    = "latex",
+    booktabs  = TRUE,
+    digits    = 3,
+    caption   = "Silhouette width for Hierarchical and Non-Hierarchical methods",
+    align     = "lccc"
+  )
+
+```
+
+# Self Organising Maps
+
+## SOM inputs check
+
+```{r}
+# Set seed for reproducibility:
+set.seed(2026)
+
+# Convert final model-ready data to matrix format for SOM:
+som_input <- airbnb_model_data |>
+  as.matrix()
+
+# Check dataset dimensions:
+som_input_overview <- tibble(
+  Dataset = "SOM input dataset",
+  Observations = nrow(som_input),
+  Variables = ncol(som_input)
+)
+
+# Output SOM input overview table in LaTeX:
+som_input_overview_latex <- som_input_overview |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Dataset Used for Self-Organising Map Analysis",
+    align = c("l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_input_overview_latex)
+```
+
+## SOM grid evaluation
+
+```{r}
+# Define candidate SOM grid sizes:
+som_grid_options <- tibble(
+  Grid = c("8x8", "10x10", "12x12"),
+  XDim = c(8, 10, 12),
+  YDim = c(8, 10, 12)
+)
+
+# Function to calculate topographic error:
+calculate_topographic_error <- function(som_model, data_matrix) {
+  codes <- som_model$codes[[1]]
+  first_bmu <- som_model$unit.classif
+  
+  data_norm <- rowSums(data_matrix^2)
+  code_norm <- rowSums(codes^2)
+  
+  dist_sq <- outer(data_norm, code_norm, "+") - 2 * data_matrix %*% t(codes)
+  dist_sq[cbind(seq_len(nrow(data_matrix)), first_bmu)] <- Inf
+  
+  second_bmu <- max.col(-dist_sq, ties.method = "first")
+  
+  unit_distances <- kohonen::unit.distances(som_model$grid)
+  
+  mean(unit_distances[cbind(first_bmu, second_bmu)] > 1.0001)
+}
+
+# Train candidate SOMs:
+som_models <- som_grid_options |>
+  mutate(
+    Model = pmap(
+      list(XDim, YDim),
+      \(xdim, ydim) {
+        kohonen::som(
+          X = som_input,
+          grid = kohonen::somgrid(
+            xdim = xdim,
+            ydim = ydim,
+            topo = "hexagonal"
+          ),
+          rlen = 100,
+          alpha = c(0.05, 0.01),
+          keep.data = TRUE
+        )
+      }
+    )
+  )
+
+# Summarise candidate grid performance:
+som_grid_evaluation <- som_models |>
+  mutate(
+    Map_Units = XDim * YDim,
+    Quantisation_Error = map_dbl(Model, ~ mean(.x$distances)),
+    Topographic_Error = map_dbl(Model, ~ calculate_topographic_error(.x, som_input))
+  ) |>
+  select(
+    Grid,
+    Map_Units,
+    Quantisation_Error,
+    Topographic_Error
+  ) |>
+  mutate(
+    Quantisation_Error = round(Quantisation_Error, 3),
+    Topographic_Error = round(Topographic_Error, 3)
+  )
+
+# Output grid evaluation table in LaTeX:
+som_grid_evaluation_latex <- som_grid_evaluation |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "SOM Grid Size Evaluation",
+    align = c("l", "r", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_grid_evaluation_latex)
+```
+
+## SOM final model
+
+```{r}
+# Select final SOM grid:
+# The 10x10 grid is used as a practical balance between map detail and interpretability.
+som_selected_grid <- "10x10"
+
+# Extract final SOM model:
+som_model <- som_models |>
+  filter(Grid == som_selected_grid) |>
+  pull(Model) |>
+  pluck(1)
+
+# Save SOM codebook vectors:
+som_codes <- som_model$codes[[1]]
+```
+
+## SOM trainingprogress
+
+```{r}
+# Plot SOM training progress manually:
+
+som_training_progress <- as.numeric(som_model$changes)
+
+plot(
+  x = seq_along(som_training_progress),
+  y = som_training_progress,
+  type = "l",
+  main = "",
+  xlab = "Iteration",
+  ylab = "Mean Distance to Closest Unit"
+)
+```
+
+## SOM counts and neighbour distances
+
+```{r}
+
+# Plot SOM counts and neighbour distances:
+par(mfrow = c(1, 2))
+plot(som_model, type = "counts", main = "SOM Unit Counts")
+plot(som_model, type = "dist.neighbours", main = "SOM Neighbour Distances")
+par(mfrow = c(1, 1))
+```
+
+## SOM cluster evaluation
+
+```{r}
+# Evaluate the number of clusters to apply to SOM codebook vectors:
+som_candidate_k <- 2:8
+
+som_code_dist <- dist(som_codes, method = "euclidean")
+
+som_cluster_evaluation <- map_dfr(
+  som_candidate_k,
+  \(k) {
+    set.seed(123)
+    km <- kmeans(
+      som_codes,
+      centers = k,
+      nstart = 25
+    )
+    
+    sil <- silhouette(km$cluster, som_code_dist)
+    
+    tibble(
+      K = k,
+      Average_Silhouette_Width = mean(sil[, "sil_width"]),
+      Total_Within_Variation = km$tot.withinss
+    )
+  }
+) |>
+  mutate(
+    Average_Silhouette_Width = round(Average_Silhouette_Width, 3),
+    Total_Within_Variation = round(Total_Within_Variation, 2)
+  )
+
+```
+
+## SOM Cluster evaluation plots
+
+```{r}
+# Plot SOM cluster number diagnostics:
+som_silhouette_plot <- som_cluster_evaluation |>
+  ggplot(aes(x = K, y = Average_Silhouette_Width)) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = som_candidate_k) +
+  labs(
+    x = "Number of SOM Clusters (K)",
+    y = "Average Silhouette Width"
+  ) +
+  theme_minimal()
+
+som_wcv_plot <- som_cluster_evaluation |>
+  ggplot(aes(x = K, y = Total_Within_Variation)) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = som_candidate_k) +
+  labs(
+    x = "Number of SOM Clusters (K)",
+    y = "Total Within-Cluster Variation"
+  ) +
+  theme_minimal()
+
+som_silhouette_plot
+som_wcv_plot
+```
+
+## SOM final model clusters
+
+```{r}
+# Select the number of SOM clusters:
+# k = 4 is used to align with the main non-hierarchical clustering segmentation and to allow comparison.
+som_k <- 4
+
+# Cluster SOM codebook vectors:
+set.seed(123)
+som_code_clusters <- kmeans(
+  som_codes,
+  centers = som_k,
+  nstart = 50
+)
+
+# Assign each listing to the cluster of its best-matching SOM unit:
+som_cluster <- factor(som_code_clusters$cluster[som_model$unit.classif])
+
+# Add SOM clusters to the original reduced dataset:
+airbnb_som_clustered <- airbnb_reduced |>
+  mutate(
+    SOM_Cluster = som_cluster
+  )
+
+# Create SOM cluster size table:
+som_cluster_sizes <- airbnb_som_clustered |>
+  count(SOM_Cluster, name = "Listings") |>
+  mutate(
+    Percentage = percent(Listings / sum(Listings), accuracy = 0.1)
+  )
+
+# Output SOM cluster sizes table:
+som_cluster_sizes_latex <- som_cluster_sizes |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "SOM Cluster Sizes",
+    align = c("l", "r", "r"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_cluster_sizes_latex)
+```
+
+## SOM cluster map
+
+```{r}
+# Plot clean SOM meta-cluster map:
+
+# Convert SOM codebook cluster assignments to a plain vector:
+som_cluster_vector <- as.integer(som_code_clusters$cluster)
+
+# Set cluster colours:
+som_cluster_colours <- c(
+  "1" = "#F8766D",
+  "2" = "#00BA38",
+  "3" = "#619CFF",
+  "4" = "#C77CFF"
+)
+
+# Identify clusters that are actually present:
+present_som_clusters <- sort(unique(som_cluster_vector))
+
+par(mar = c(4, 4, 1, 8), xpd = TRUE)
+
+# Plot empty SOM units coloured by meta-cluster:
+plot(
+  som_model,
+  type = "mapping",
+  bgcol = som_cluster_colours[as.character(som_cluster_vector)],
+  pchs = NA,
+  main = ""
+)
+
+# Add cluster boundaries:
+kohonen::add.cluster.boundaries(
+  som_model,
+  som_cluster_vector
+)
+
+# Add legend:
+legend(
+  "right",
+  inset = c(-0.28, 0),
+  legend = paste("SOM Cluster", present_som_clusters),
+  fill = som_cluster_colours[as.character(present_som_clusters)],
+  border = "black",
+  bty = "n",
+  cex = 0.8,
+  title = "Meta-Cluster"
+)
+
+```
+
+## SOM numeric profiling
+
+```{r}
+# Profile SOM clusters using original numeric variables:
+som_numeric_profile <- airbnb_som_clustered |>
+  group_by(SOM_Cluster) |>
+  summarise(
+    Listings = n(),
+    Mean_Price = round(mean(price, na.rm = TRUE), 0),
+    Median_Price = round(median(price, na.rm = TRUE), 0),
+    Mean_Accommodates = round(mean(accommodates, na.rm = TRUE), 2),
+    Mean_Availability_365 = round(mean(availability_365, na.rm = TRUE), 1),
+    Mean_Number_of_Reviews = round(mean(number_of_reviews, na.rm = TRUE), 1),
+    Mean_Review_Rating = round(mean(review_scores_rating, na.rm = TRUE), 2),
+    Mean_Host_Listings_Count = round(mean(host_listings_count, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+# Pivot profile for output:
+som_numeric_profile_pivot <- som_numeric_profile |>
+  pivot_longer(
+    cols = -SOM_Cluster,
+    names_to = "Metric",
+    values_to = "Value"
+  ) |>
+  mutate(
+    Metric = str_replace_all(Metric, "_", " ") |>
+      str_to_title()
+  ) |>
+  pivot_wider(
+    names_from = SOM_Cluster,
+    values_from = Value,
+    names_prefix = "SOM Cluster "
+  )
+
+# Output SOM numeric profile table in LaTeX:
+som_numeric_profile_latex <- som_numeric_profile_pivot |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Numeric Profile of SOM Clusters",
+    align = "r",
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_numeric_profile_latex)
+```
+
+## SOM categorical profiling
+
+```{r}
+# Profile SOM clusters using dominant categorical values:
+som_categorical_profile <- airbnb_som_clustered |>
+  group_by(SOM_Cluster) |>
+  summarise(
+    Most_Common_Neighbourhood = names(sort(table(neighbourhood_cleansed), decreasing = TRUE))[1],
+    Most_Common_Property_Type = names(sort(table(property_type_proper_trim), decreasing = TRUE))[1],
+    .groups = "drop"
+  )
+
+# Output SOM categorical profile table in LaTeX:
+som_categorical_profile_latex <- som_categorical_profile |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Dominant Categorical Characteristics of SOM Clusters",
+    align = c("l", "l", "l"),
+    escape = TRUE
+  ) |>
+  kable_styling(
+    latex_options = c("hold_position", "scale_down")
+  )
+
+cat(som_categorical_profile_latex)
+```
+
+## SOM PCA visualisation
+
+```{r}
+# Create PCA visualisation of SOM clusters:
+som_pca <- prcomp(
+  som_input,
+  center = FALSE,
+  scale. = FALSE
+)
+
+som_pca_plot_data <- as_tibble(som_pca$x[, 1:2]) |>
+  mutate(
+    SOM_Cluster = factor(som_cluster)
+  )
+
+som_pca_plot_data |>
+  ggplot(aes(x = PC1, y = PC2, colour = SOM_Cluster)) +
+  geom_point(alpha = 0.5, size = 0.8) +
+  labs(
+    x = "Principal Component 1",
+    y = "Principal Component 2",
+    colour = "SOM Cluster"
+  ) +
+  theme_minimal()
+```
+
+## SOM Comparative analysis
+
+```{r}
+# Restrict SOM and NHC assignments to the HC sample
+som_sample <- som_cluster[hc_results$sample_index]
+nhc_sample <- nhc_results$clusters[hc_results$sample_index]
+hc_sample <- hc_results$clusters
+
+# Create percentage table for HC
+som_hc_table <- table(
+  "SOM Cluster" = som_sample,
+  "HC Cluster" = hc_sample
+)
+
+som_hc_percent <- round(
+  prop.table(som_hc_table, margin = 1) * 100,
+  1
+)
+
+# Convert to dataframe
+som_hc_df <- as.data.frame.matrix(som_hc_percent)
+
+# Create LaTeX table HC
+som_hc_latex <- kable(
+  som_hc_df,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Percentage Composition of SOM Clusters Across HC Clusters",
+  align = "lccc"
+)
+
+# Create percentage table for NHC
+som_nhc_table <- table(
+  "SOM Cluster" = som_sample,
+  "NHC Cluster" = nhc_sample
+)
+
+som_nhc_percent <- round(
+  prop.table(som_nhc_table, margin = 1) * 100,
+  1
+)
+
+# Convert to dataframe
+som_nhc_df <- as.data.frame.matrix(som_nhc_percent)
+
+# Create LaTeX table NHC
+som_nhc_latex <- kable(
+  som_nhc_df,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Percentage Composition of SOM Clusters Across NHC Clusters",
+  align = "lccc"
+)
+
+#Silhouette comparison
+silhouette_comparison <- tibble(
+  Method = c("Hierarchical Clustering",
+             "Non-Hierarchical Clustering",
+             "Self-Organising Map"),
+  `Average silhouette width` = c(
+    mean(hc_results$silhouette[, "sil_width"]),
+    nhc_results$silhouette_width$silhouette[
+      nhc_results$silhouette_width$k == nhc_results$best_k
+    ],
+    silhouette_scores[som_k - min(som_candidate_k) + 1]
+  )
+)
+
+# Compile LaTeX code for silhouette table
+silhouette_comparison |>
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    digits = 3,
+    caption = "Comparison of Average Silhouette Widths Across Clustering Methods",
+    align = "lcc"
+  )
+```
+
+## Save SOM results
+
+```{r}
+# Save SOM Results
+som_results <- list(
+  input_data = som_input,
+  grid_evaluation = som_grid_evaluation,
+  model = som_model,
+  codebook_vectors = som_codes,
+  codebook_cluster_evaluation = som_cluster_evaluation,
+  codebook_clusters = som_code_clusters,
+  clusters = som_cluster,
+  clustered_data = airbnb_som_clustered,
+  cluster_sizes = som_cluster_sizes,
+  numeric_profile = som_numeric_profile,
+  categorical_profile = som_categorical_profile
+)
+```

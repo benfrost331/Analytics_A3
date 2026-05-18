@@ -539,7 +539,7 @@ plot(
   hc_final,
   labels = FALSE,
   hang = -1,
-  main = paste0("Ward.D2 Hierarchical Clustering Dendrogram, K = ", hc_best_k),
+  main = NULL,
   xlab = "Airbnb Listings",
   ylab = "Height"
 )
